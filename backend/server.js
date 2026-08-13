@@ -1,14 +1,13 @@
 /**
- * server.js
- * =========
- * Main Express server — MULTI-PAIR EDITION
- * Monitors 5 pairs simultaneously: XAU/USD, USD/JPY, GBP/JPY, EUR/USD, BTC/USD
- * Host target: Render (Web Service)
+ * server.js — SINGLE-SERVICE EDITION
+ * ===================================
+ * Serves both the Express API AND the static frontend from one Render web service.
+ * No Netlify needed. No CORS needed.
  */
 
 require('dotenv').config();
 const express = require('express');
-const cors = require('cors');
+const path = require('path');
 
 const TwelveDataService = require('./twelveDataService');
 const StrategyEngine = require('./strategyEngine');
@@ -16,13 +15,9 @@ const StrategyEngine = require('./strategyEngine');
 const app = express();
 app.use(express.json());
 
-// ── CORS CONFIGURATION ──
-const allowedOrigin = process.env.ALLOWED_ORIGIN || '*';
-app.use(cors({
-  origin: allowedOrigin,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
+// ── SERVE STATIC FRONTEND FILES ──
+// This serves index.html, style.css, app.js from the /frontend folder
+app.use(express.static(path.join(__dirname, '../frontend')));
 
 // ── SERVICES ──
 const tdService = new TwelveDataService(process.env.TWELVE_DATA_API_KEY);
@@ -31,7 +26,6 @@ const tdService = new TwelveDataService(process.env.TWELVE_DATA_API_KEY);
 const DEFAULT_PAIRS = ['XAU/USD', 'USD/JPY', 'GBP/JPY', 'EUR/USD', 'BTC/USD'];
 const pairs = process.env.WATCHLIST ? process.env.WATCHLIST.split(',') : DEFAULT_PAIRS;
 
-// Per-pair state
 const pairState = {};
 pairs.forEach(sym => {
   pairState[sym] = {
@@ -43,7 +37,6 @@ pairs.forEach(sym => {
   };
 });
 
-// Global bot state
 let botState = {
   status: 'PAUSED',
   timeframe: process.env.DEFAULT_TIMEFRAME || '1h',
@@ -99,13 +92,11 @@ app.get('/api/status', (req, res) => {
 });
 
 // ── API: GET /api/market-data ──
-// Now supports ?symbol=ALL to fetch all pairs at once
 app.get('/api/market-data', async (req, res) => {
   const symbol = req.query.symbol || 'EUR/USD';
 
   try {
     if (symbol === 'ALL') {
-      // Fetch all pairs
       const results = {};
       for (const sym of pairs) {
         const quote = await tdService.getQuote(sym);
@@ -121,7 +112,6 @@ app.get('/api/market-data', async (req, res) => {
       return res.json({ allPairs: results, timestamp: new Date().toISOString() });
     }
 
-    // Single pair
     const quote = await tdService.getQuote(symbol);
     const ohlcv = await tdService.getTimeSeries(symbol, botState.timeframe, 100);
     pairState[symbol].ohlcvCache = ohlcv;
@@ -144,13 +134,11 @@ app.get('/api/market-data', async (req, res) => {
 });
 
 // ── API: GET /api/setup ──
-// Generate setup for a specific pair or scan all
 app.get('/api/setup', async (req, res) => {
   const symbol = req.query.symbol || 'EUR/USD';
   const scanAll = req.query.scan === 'true';
 
   if (scanAll) {
-    // Scan all 5 pairs and return array of setups
     const setups = [];
     for (const sym of pairs) {
       try {
@@ -180,12 +168,10 @@ app.get('/api/setup', async (req, res) => {
       }
     }
 
-    // Sort by score descending
     setups.sort((a, b) => b.score - a.score);
     return res.json({ scan: true, setups, count: setups.length, timestamp: new Date().toISOString() });
   }
 
-  // Single pair setup
   try {
     let ohlcv = pairState[symbol].ohlcvCache;
     if (ohlcv.length < 30) {
@@ -256,7 +242,6 @@ app.get('/api/trades', (req, res) => {
     allHistory.push(...engine.getTradeHistory(50));
   });
 
-  // Sort history by close time descending
   allHistory.sort((a, b) => new Date(b.closeTime || 0) - new Date(a.closeTime || 0));
 
   res.json({
@@ -275,14 +260,12 @@ app.post('/api/positions/:id/close', async (req, res) => {
   const { id } = req.params;
   const { symbol } = req.body;
 
-  // Find which pair owns this position
   let targetSymbol = symbol;
   let targetEngine = null;
 
   if (targetSymbol && pairState[targetSymbol]) {
     targetEngine = pairState[targetSymbol].strategy;
   } else {
-    // Search all pairs
     for (const sym of pairs) {
       const pos = pairState[sym].strategy.getActivePositions().find(p => p.id === id);
       if (pos) {
@@ -346,17 +329,18 @@ app.post('/api/control', (req, res) => {
   res.json({ message: `Bot ${action.toLowerCase()}ed successfully`, state: botState });
 });
 
-// ── GLOBAL PORTFOLIO HELPER ──
+// ── CATCH-ALL: SERVE index.html FOR SPA ROUTES ──
+// This ensures refreshing the page or visiting any route loads the dashboard
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, '../frontend', 'index.html'));
+});
+
+// ── GLOBAL PORTFOLIO ──
 function getGlobalPortfolio() {
-  let totalUnrealized = 0;
-  let totalRealized = 0;
-  let totalTrades = 0;
-  let totalWins = 0;
-  let activeCount = 0;
+  let totalUnrealized = 0, totalRealized = 0, totalTrades = 0, totalWins = 0, activeCount = 0;
 
   pairs.forEach(sym => {
-    const engine = pairState[sym].strategy;
-    const port = engine.getPortfolio();
+    const port = pairState[sym].strategy.getPortfolio();
     totalUnrealized += port.unrealizedPnL;
     totalRealized += port.realizedPnL;
     totalTrades += port.totalTrades;
@@ -374,7 +358,7 @@ function getGlobalPortfolio() {
   };
 }
 
-// ── POLLING LOOP (Multi-Pair) ──
+// ── POLLING LOOP ──
 async function pollMarket() {
   if (botState.status !== 'ACTIVE') return;
 
@@ -390,10 +374,8 @@ async function pollMarket() {
         pairState[sym].lastPrice = quote.price;
         pairState[sym].lastCheck = new Date().toISOString();
 
-        // Update positions (check SL/TP)
         const events = pairState[sym].strategy.updatePositions(quote.price);
 
-        // Auto-trade logic
         if (botState.autoTrade) {
           const lastSetupTime = pairState[sym].lastSetup 
             ? new Date(pairState[sym].lastSetup.timestamp).getTime() 
@@ -433,7 +415,6 @@ function stopPolling() {
   }
 }
 
-// ── GRACEFUL SHUTDOWN ──
 process.on('SIGTERM', () => { stopPolling(); process.exit(0); });
 process.on('SIGINT', () => { stopPolling(); process.exit(0); });
 
@@ -441,11 +422,10 @@ process.on('SIGINT', () => { stopPolling(); process.exit(0); });
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log('╔════════════════════════════════════════════════════════════╗');
-  console.log('║     AUTOMATED TRADING DASHBOARD — MULTI-PAIR              ║');
-  console.log('║     Strategy: YouTube Multi-Confluence Framework          ║');
+  console.log('║  AUTOMATED TRADING DASHBOARD — SINGLE SERVICE              ║');
+  console.log('║  Frontend + Backend on one Render Web Service              ║');
   console.log('╠════════════════════════════════════════════════════════════╣');
-  console.log(`║  Server running on port ${PORT}                            ║`);
-  console.log(`║  CORS Origin: ${allowedOrigin}                    ║`);
+  console.log(`║  Dashboard: http://localhost:${PORT} (or your Render URL)   ║`);
   console.log(`║  Pairs: ${pairs.join(', ')}          ║`);
   console.log(`║  Status: ${botState.status}                                       ║`);
   console.log('╚════════════════════════════════════════════════════════════╝');
