@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AutoTrader Pro — Multi-Pair Dashboard</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<base target="_blank">
+</head>
+<body>
+  <!-- ═══════════════════════════════════════════════ -->
+  <!-- HEADER                                          -->
+  <!-- ═══════════════════════════════════════════════ -->
+  <header class="header">
+    <div class="header-left">
+      <div class="logo">
+        <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
+          <rect width="28" height="28" rx="6" fill="#10b981"/>
+          <path d="M8 18L12 12L16 16L20 8" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span class="logo-text">AutoTrader<span class="logo-pro">Pro</span></span>
+      </div>
+      <div class="connection-status" id="connectionStatus">
+        <span class="status-dot" id="statusDot"></span>
+        <span class="status-text" id="statusText">Checking...</span>
+      </div>
+    </div>
+
+    <div class="header-center">
+      <div class="timeframe-selector">
+        <label>Timeframe</label>
+        <select id="timeframeSelect">
+          <option value="1min">1m</option>
+          <option value="5min">5m</option>
+          <option value="15min">15m</option>
+          <option value="30min">30m</option>
+          <option value="1h" selected>1H</option>
+          <option value="4h">4H</option>
+          <option value="1day">1D</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="header-right">
+      <div class="bot-toggle">
+        <span class="toggle-label">Bot</span>
+        <label class="switch">
+          <input type="checkbox" id="botToggle">
+          <span class="slider"></span>
+        </label>
+        <span class="toggle-status" id="botStatus">PAUSED</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ═══════════════════════════════════════════════ -->
+  <!-- MAIN DASHBOARD                                  -->
+  <!-- ═══════════════════════════════════════════════ -->
+  <main class="dashboard">
+
+    <!-- Row 1: Multi-Pair Market Grid -->
+    <section class="grid-row full-width">
+      <div class="card card-pairs">
+        <div class="card-header">
+          <h2>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="M18 9l-5 5-4-4-3 3"/></svg>
+            Watchlist — 5 Pairs
+          </h2>
+          <div class="header-actions">
+            <button class="btn-scan-all" id="scanAllBtn">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+              Scan All Pairs
+            </button>
+            <span class="live-badge" id="liveBadge">● LIVE</span>
+          </div>
+        </div>
+        <div class="pairs-grid" id="pairsGrid">
+          <!-- Pairs injected by JS -->
+        </div>
+      </div>
+    </section>
+
+    <!-- Row 2: Setup Generator + Strategy -->
+    <section class="grid-row">
+
+      <!-- Setup Generator Card -->
+      <div class="card card-setup">
+        <div class="card-header">
+          <h2>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+            Setup Generator
+          </h2>
+          <span class="setup-symbol-label" id="setupSymbolLabel">Select a pair</span>
+        </div>
+        <div class="setup-body">
+          <p class="setup-desc">Click "Generate Setup" on any pair card above, or select a pair below to analyze.</p>
+
+          <div class="setup-pair-select">
+            <label>Target Pair</label>
+            <select id="setupPairSelect">
+              <option value="XAU/USD">XAU/USD (Gold)</option>
+              <option value="USD/JPY">USD/JPY</option>
+              <option value="GBP/JPY">GBP/JPY</option>
+              <option value="EUR/USD" selected>EUR/USD</option>
+              <option value="BTC/USD">BTC/USD</option>
+            </select>
+            <button class="btn-generate" id="generateBtn">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+              Generate Setup
+            </button>
+          </div>
+
+          <!-- Result Container -->
+          <div class="setup-result" id="setupResult" style="display:none;">
+            <div class="signal-badge" id="signalBadge">HOLD</div>
+            <div class="score-ring">
+              <svg viewBox="0 0 120 120">
+                <circle class="score-bg" cx="60" cy="60" r="50"/>
+                <circle class="score-progress" id="scoreProgress" cx="60" cy="60" r="50"/>
+              </svg>
+              <div class="score-text">
+                <span class="score-number" id="scoreNumber">0</span>
+                <span class="score-label">% Setup</span>
+              </div>
+            </div>
+            <div class="setup-details" id="setupDetails"></div>
+            <button class="btn-execute" id="executeBtn" style="display:none;">
+              Execute Trade
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Strategy Summary Card -->
+      <div class="card card-strategy">
+        <div class="card-header">
+          <h2>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+            Strategy Framework
+          </h2>
+          <span class="badge-source">YouTube Course</span>
+        </div>
+        <div class="strategy-body">
+          <div class="strategy-steps">
+            <div class="step">
+              <div class="step-num">1</div>
+              <div class="step-content">
+                <strong>Trend Direction</strong>
+                <span>EMA 9/21 crossover identifies trend. Price above EMA 21 = bullish bias.</span>
+              </div>
+            </div>
+            <div class="step">
+              <div class="step-num">2</div>
+              <div class="step-content">
+                <strong>Setup & Entry</strong>
+                <span>RSI momentum filter (30-70). Trade at key S/R levels with volume confirmation.</span>
+              </div>
+            </div>
+            <div class="step">
+              <div class="step-num">3</div>
+              <div class="step-content">
+                <strong>Risk Management</strong>
+                <span>Max 2% risk per trade. 2:1 R/R minimum. ATR stops. Max 3 positions per pair.</span>
+              </div>
+            </div>
+          </div>
+          <div class="strategy-params">
+            <div class="param">
+              <span class="param-label">EMA Fast</span>
+              <span class="param-value" id="paramEmaFast">9</span>
+            </div>
+            <div class="param">
+              <span class="param-label">EMA Slow</span>
+              <span class="param-value" id="paramEmaSlow">21</span>
+            </div>
+            <div class="param">
+              <span class="param-label">RSI Period</span>
+              <span class="param-value" id="paramRsi">14</span>
+            </div>
+            <div class="param">
+              <span class="param-label">Max Risk</span>
+              <span class="param-value" id="paramRisk">2%</span>
+            </div>
+            <div class="param">
+              <span class="param-label">R/R Ratio</span>
+              <span class="param-value">1:2</span>
+            </div>
+            <div class="param">
+              <span class="param-label">Max Pos/Pair</span>
+              <span class="param-value" id="paramMaxPos">3</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Row 3: Portfolio + Signal Log -->
+    <section class="grid-row">
+
+      <!-- Portfolio Summary -->
+      <div class="card card-portfolio">
+        <div class="card-header">
+          <h2>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>
+            Global Portfolio
+          </h2>
+        </div>
+        <div class="portfolio-body">
+          <div class="portfolio-metric">
+            <span class="metric-label">Unrealized P&L</span>
+            <span class="metric-value" id="unrealizedPnL">$0.00</span>
+          </div>
+          <div class="portfolio-metric">
+            <span class="metric-label">Realized P&L</span>
+            <span class="metric-value" id="realizedPnL">$0.00</span>
+          </div>
+          <div class="portfolio-metric">
+            <span class="metric-label">Win Rate</span>
+            <span class="metric-value" id="winRate">0%</span>
+          </div>
+          <div class="portfolio-metric">
+            <span class="metric-label">Total Trades</span>
+            <span class="metric-value" id="totalTrades">0</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Signal Log -->
+      <div class="card card-signals">
+        <div class="card-header">
+          <h2>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg>
+            Signal Log
+          </h2>
+        </div>
+        <div class="signals-body">
+          <div class="signal-list" id="signalList">
+            <div class="signal-empty">Signals will appear here when setups are generated.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Row 4: Active Positions -->
+    <section class="grid-row full-width">
+      <div class="card card-trades">
+        <div class="card-header">
+          <h2>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+            Active Positions & Trade Log
+          </h2>
+          <button class="btn-refresh-sm" id="refreshTrades">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+            Refresh
+          </button>
+        </div>
+        <div class="trades-body">
+          <div class="table-wrapper">
+            <table class="trades-table" id="tradesTable">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Symbol</th>
+                  <th>Direction</th>
+                  <th>Entry</th>
+                  <th>Current/Exit</th>
+                  <th>Stop Loss</th>
+                  <th>Take Profit</th>
+                  <th>P&L</th>
+                  <th>Setup Score</th>
+                  <th>Status</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody id="tradesBody">
+                <tr class="empty-row">
+                  <td colspan="11">No active positions. Generate a setup to start trading.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3 class="section-subtitle">Trade History</h3>
+          <div class="table-wrapper">
+            <table class="trades-table history-table" id="historyTable">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Symbol</th>
+                  <th>Direction</th>
+                  <th>Entry</th>
+                  <th>Exit</th>
+                  <th>P&L</th>
+                  <th>Close Reason</th>
+                  <th>Time</th>
+                </tr>
+              </thead>
+              <tbody id="historyBody">
+                <tr class="empty-row">
+                  <td colspan="8">No closed trades yet.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Toast notifications -->
+  <div class="toast-container" id="toastContainer"></div>
+
+  <script src="app.js"></script>
+</body>
+      </html>
