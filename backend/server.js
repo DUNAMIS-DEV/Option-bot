@@ -1,7 +1,7 @@
 /**
- * server.js — SINGLE-SERVICE EDITION
- * ===================================
- * Serves both API and static frontend from one Render Web Service.
+ * server.js — SINGLE-SERVICE with Rate Limit Protection
+ * ======================================================
+ * Prevents HTTP 429 by using request queue in twelveDataService.
  * Watchlist: XAU/USD, USD/JPY, GBP/JPY, EUR/USD, GBP/USD
  */
 
@@ -35,7 +35,7 @@ const DEFAULT_PAIRS = ['XAU/USD', 'USD/JPY', 'GBP/JPY', 'EUR/USD', 'GBP/USD'];
 const pairs = process.env.WATCHLIST ? process.env.WATCHLIST.split(',') : DEFAULT_PAIRS;
 
 console.log('[CONFIG] Monitoring pairs:', pairs.join(', '));
-console.log('[CONFIG] API Key present:', API_KEY ? 'YES (' + API_KEY.substring(0, 8) + '...)' : 'NO');
+console.log('[CONFIG] API Key present:', API_KEY ? 'YES' : 'NO');
 
 const pairState = {};
 pairs.forEach(sym => {
@@ -73,7 +73,7 @@ app.get('/api/validate-key', async (req, res) => {
   if (!API_KEY) {
     return res.status(400).json({ 
       valid: false, 
-      message: 'TWELVE_DATA_API_KEY not configured. Add it to Render Environment Variables.' 
+      message: 'TWELVE_DATA_API_KEY not configured' 
     });
   }
   const result = await tdService.validateApiKey();
@@ -93,7 +93,6 @@ app.get('/api/status', (req, res) => {
     },
     strategy: {
       name: 'YouTube Course Multi-Confluence Strategy',
-      source: 'ULTIMATE Options Trading Course for Beginners',
       indicators: {
         emaFast: parseInt(process.env.EMA_FAST_PERIOD || 9),
         emaSlow: parseInt(process.env.EMA_SLOW_PERIOD || 21),
@@ -125,6 +124,7 @@ app.get('/api/market-data', async (req, res) => {
 
   try {
     if (symbol === 'ALL') {
+      // Fetch all pairs sequentially (rate limiting handles delays)
       const results = {};
       for (const sym of pairs) {
         const quote = await tdService.getQuote(sym);
@@ -136,8 +136,6 @@ app.get('/api/market-data', async (req, res) => {
           pairState[sym].lastPrice = quote.price;
           pairState[sym].strategy.updatePositions(quote.price);
         }
-        // Small delay to avoid rate limiting
-        await new Promise(r => setTimeout(r, 300));
       }
       return res.json({ allPairs: results, timestamp: new Date().toISOString() });
     }
@@ -149,7 +147,7 @@ app.get('/api/market-data', async (req, res) => {
         error: 'Twelve Data API error',
         detail: quote.message,
         symbol,
-        hint: 'Check your TWELVE_DATA_API_KEY in Render Environment Variables'
+        hint: 'Rate limit may have been hit. Wait a moment and try again.'
       });
     }
 
@@ -196,11 +194,13 @@ app.get('/api/setup', async (req, res) => {
     const setups = [];
     for (const sym of pairs) {
       try {
+        // Use cached OHLCV if available and fresh
         let ohlcv = pairState[sym].ohlcvCache;
         if (ohlcv.length < 30) {
           ohlcv = await tdService.getTimeSeries(sym, botState.timeframe, 100);
           pairState[sym].ohlcvCache = ohlcv;
         }
+
         const quote = await tdService.getQuote(sym);
 
         if (quote.error) {
@@ -226,13 +226,13 @@ app.get('/api/setup', async (req, res) => {
       } catch (err) {
         console.error(`[SCAN] Error for ${sym}:`, err.message);
       }
-      await new Promise(r => setTimeout(r, 300));
     }
 
     setups.sort((a, b) => b.score - a.score);
     return res.json({ scan: true, setups, count: setups.length, timestamp: new Date().toISOString() });
   }
 
+  // Single pair setup
   try {
     let ohlcv = pairState[symbol].ohlcvCache;
     if (ohlcv.length < 30) {
@@ -484,7 +484,6 @@ async function pollMarket() {
     } catch (err) {
       console.error(`[POLL] Error for ${sym}:`, err.message);
     }
-    await new Promise(r => setTimeout(r, 300));
   }
 }
 
@@ -510,7 +509,7 @@ process.on('SIGINT', () => { stopPolling(); process.exit(0); });
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log('╔════════════════════════════════════════════════════════════╗');
-  console.log('║  AUTOMATED TRADING DASHBOARD — SINGLE SERVICE            ║');
+  console.log('║  AUTOMATED TRADING DASHBOARD — RATE LIMIT PROTECTED      ║');
   console.log('╠════════════════════════════════════════════════════════════╣');
   console.log(`║  Dashboard: http://localhost:${PORT}                        ║`);
   console.log(`║  Pairs: ${pairs.join(', ')}          ║`);
