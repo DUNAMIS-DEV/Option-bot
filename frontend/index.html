@@ -10,9 +10,6 @@
 <base target="_blank">
 </head>
 <body>
-  <!-- ═══════════════════════════════════════════════ -->
-  <!-- HEADER                                          -->
-  <!-- ═══════════════════════════════════════════════ -->
   <header class="header">
     <div class="header-left">
       <div class="logo">
@@ -55,12 +52,8 @@
     </div>
   </header>
 
-  <!-- ═══════════════════════════════════════════════ -->
-  <!-- MAIN DASHBOARD                                  -->
-  <!-- ═══════════════════════════════════════════════ -->
   <main class="dashboard">
 
-    <!-- Row 1: Multi-Pair Market Grid -->
     <section class="grid-row full-width">
       <div class="card card-pairs">
         <div class="card-header">
@@ -82,10 +75,8 @@
       </div>
     </section>
 
-    <!-- Row 2: Setup Generator + Strategy -->
     <section class="grid-row">
 
-      <!-- Setup Generator Card -->
       <div class="card card-setup">
         <div class="card-header">
           <h2>
@@ -104,7 +95,7 @@
               <option value="USD/JPY">USD/JPY</option>
               <option value="GBP/JPY">GBP/JPY</option>
               <option value="EUR/USD" selected>EUR/USD</option>
-              <option value="BTC/USD">BTC/USD</option>
+              <option value="GBP/USD">GBP/USD</option>
             </select>
             <button class="btn-generate" id="generateBtn">
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
@@ -112,7 +103,6 @@
             </button>
           </div>
 
-          <!-- Result Container -->
           <div class="setup-result" id="setupResult" style="display:none;">
             <div class="signal-badge" id="signalBadge">HOLD</div>
             <div class="score-ring">
@@ -133,7 +123,6 @@
         </div>
       </div>
 
-      <!-- Strategy Summary Card -->
       <div class="card card-strategy">
         <div class="card-header">
           <h2>
@@ -196,10 +185,8 @@
       </div>
     </section>
 
-    <!-- Row 3: Portfolio + Signal Log -->
     <section class="grid-row">
 
-      <!-- Portfolio Summary -->
       <div class="card card-portfolio">
         <div class="card-header">
           <h2>
@@ -227,7 +214,6 @@
         </div>
       </div>
 
-      <!-- Signal Log -->
       <div class="card card-signals">
         <div class="card-header">
           <h2>
@@ -243,7 +229,6 @@
       </div>
     </section>
 
-    <!-- Row 4: Active Positions -->
     <section class="grid-row full-width">
       <div class="card card-trades">
         <div class="card-header">
@@ -310,9 +295,8 @@
 
   </main>
 
-  <!-- Toast notifications -->
   <div class="toast-container" id="toastContainer"></div>
 
   <script src="app.js"></script>
 </body>
-      </html>
+  </html>
