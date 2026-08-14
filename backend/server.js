@@ -1,8 +1,8 @@
 /**
  * server.js — SINGLE-SERVICE EDITION
  * ===================================
- * Serves both the Express API AND the static frontend from one Render web service.
- * No Netlify needed. No CORS needed.
+ * Serves both API and static frontend from one Render Web Service.
+ * Watchlist: XAU/USD, USD/JPY, GBP/JPY, EUR/USD, GBP/USD
  */
 
 require('dotenv').config();
@@ -15,16 +15,27 @@ const StrategyEngine = require('./strategyEngine');
 const app = express();
 app.use(express.json());
 
-// ── SERVE STATIC FRONTEND FILES ──
-// This serves index.html, style.css, app.js from the /frontend folder
+// ── SERVE STATIC FRONTEND ──
 app.use(express.static(path.join(__dirname, '../frontend')));
 
 // ── SERVICES ──
-const tdService = new TwelveDataService(process.env.TWELVE_DATA_API_KEY);
+const API_KEY = process.env.TWELVE_DATA_API_KEY;
+
+if (!API_KEY) {
+  console.error('╔════════════════════════════════════════════════════════════╗');
+  console.error('║  CRITICAL: TWELVE_DATA_API_KEY is not set!                 ║');
+  console.error('║  Add it to your Render Environment Variables.              ║');
+  console.error('╚════════════════════════════════════════════════════════════╝');
+}
+
+const tdService = new TwelveDataService(API_KEY);
 
 // ── MULTI-PAIR CONFIGURATION ──
-const DEFAULT_PAIRS = ['XAU/USD', 'USD/JPY', 'GBP/JPY', 'EUR/USD', 'BTC/USD'];
+const DEFAULT_PAIRS = ['XAU/USD', 'USD/JPY', 'GBP/JPY', 'EUR/USD', 'GBP/USD'];
 const pairs = process.env.WATCHLIST ? process.env.WATCHLIST.split(',') : DEFAULT_PAIRS;
+
+console.log('[CONFIG] Monitoring pairs:', pairs.join(', '));
+console.log('[CONFIG] API Key present:', API_KEY ? 'YES (' + API_KEY.substring(0, 8) + '...)' : 'NO');
 
 const pairState = {};
 pairs.forEach(sym => {
@@ -49,7 +60,24 @@ let pollTimer = null;
 
 // ── HEALTH CHECK ──
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  res.json({ 
+    status: 'ok', 
+    apiKeyPresent: !!API_KEY,
+    pairs: pairs,
+    timestamp: new Date().toISOString() 
+  });
+});
+
+// ── API KEY VALIDATION ──
+app.get('/api/validate-key', async (req, res) => {
+  if (!API_KEY) {
+    return res.status(400).json({ 
+      valid: false, 
+      message: 'TWELVE_DATA_API_KEY not configured. Add it to Render Environment Variables.' 
+    });
+  }
+  const result = await tdService.validateApiKey();
+  res.json(result);
 });
 
 // ── API: GET /api/status ──
@@ -101,35 +129,51 @@ app.get('/api/market-data', async (req, res) => {
       for (const sym of pairs) {
         const quote = await tdService.getQuote(sym);
         results[sym] = {
-          quote: quote || { error: 'Unable to fetch' },
+          quote: quote.error ? { error: quote.message, price: null } : quote,
           timestamp: new Date().toISOString()
         };
-        if (quote && quote.price) {
+        if (quote && !quote.error && quote.price) {
           pairState[sym].lastPrice = quote.price;
           pairState[sym].strategy.updatePositions(quote.price);
         }
+        // Small delay to avoid rate limiting
+        await new Promise(r => setTimeout(r, 300));
       }
       return res.json({ allPairs: results, timestamp: new Date().toISOString() });
     }
 
     const quote = await tdService.getQuote(symbol);
+
+    if (quote.error) {
+      return res.status(503).json({ 
+        error: 'Twelve Data API error',
+        detail: quote.message,
+        symbol,
+        hint: 'Check your TWELVE_DATA_API_KEY in Render Environment Variables'
+      });
+    }
+
     const ohlcv = await tdService.getTimeSeries(symbol, botState.timeframe, 100);
     pairState[symbol].ohlcvCache = ohlcv;
 
-    if (quote && quote.price) {
+    if (quote.price) {
       pairState[symbol].lastPrice = quote.price;
       pairState[symbol].strategy.updatePositions(quote.price);
     }
 
     res.json({
       symbol,
-      quote: quote || { error: 'Unable to fetch quote' },
+      quote,
       ohlcv: ohlcv.slice(0, 50),
       timestamp: new Date().toISOString()
     });
   } catch (err) {
     console.error('[API] Market data error:', err.message);
-    res.status(500).json({ error: err.message, symbol });
+    res.status(500).json({ 
+      error: err.message,
+      symbol,
+      hint: 'Check Render logs for details'
+    });
   }
 });
 
@@ -137,6 +181,16 @@ app.get('/api/market-data', async (req, res) => {
 app.get('/api/setup', async (req, res) => {
   const symbol = req.query.symbol || 'EUR/USD';
   const scanAll = req.query.scan === 'true';
+
+  if (!API_KEY) {
+    return res.status(503).json({
+      error: 'TWELVE_DATA_API_KEY not configured',
+      message: 'Add your Twelve Data API key to Render Environment Variables',
+      setup: null,
+      signal: 'HOLD',
+      score: 0
+    });
+  }
 
   if (scanAll) {
     const setups = [];
@@ -148,7 +202,13 @@ app.get('/api/setup', async (req, res) => {
           pairState[sym].ohlcvCache = ohlcv;
         }
         const quote = await tdService.getQuote(sym);
-        const price = quote ? quote.price : null;
+
+        if (quote.error) {
+          console.error(`[SETUP] Quote error for ${sym}:`, quote.message);
+          continue;
+        }
+
+        const price = quote.price;
 
         if (price) {
           const setup = pairState[sym].strategy.generateSetup(ohlcv, price, sym);
@@ -166,6 +226,7 @@ app.get('/api/setup', async (req, res) => {
       } catch (err) {
         console.error(`[SCAN] Error for ${sym}:`, err.message);
       }
+      await new Promise(r => setTimeout(r, 300));
     }
 
     setups.sort((a, b) => b.score - a.score);
@@ -180,10 +241,28 @@ app.get('/api/setup', async (req, res) => {
     }
 
     const quote = await tdService.getQuote(symbol);
-    const price = quote ? quote.price : null;
+
+    if (quote.error) {
+      return res.status(503).json({
+        error: 'Failed to fetch market data',
+        detail: quote.message,
+        symbol,
+        setup: null,
+        signal: 'HOLD',
+        score: 0
+      });
+    }
+
+    const price = quote.price;
 
     if (!price) {
-      return res.status(503).json({ error: 'Unable to fetch current price' });
+      return res.status(503).json({ 
+        error: 'Unable to fetch current price',
+        symbol,
+        setup: null,
+        signal: 'HOLD',
+        score: 0
+      });
     }
 
     const setup = pairState[symbol].strategy.generateSetup(ohlcv, price, symbol);
@@ -200,7 +279,13 @@ app.get('/api/setup', async (req, res) => {
     res.json(setup);
   } catch (err) {
     console.error('[API] Setup generation error:', err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ 
+      error: err.message,
+      symbol,
+      setup: null,
+      signal: 'HOLD',
+      score: 0
+    });
   }
 });
 
@@ -214,8 +299,11 @@ app.post('/api/setup/execute', async (req, res) => {
   }
 
   const quote = await tdService.getQuote(targetSymbol);
-  if (!quote || !quote.price) {
-    return res.status(503).json({ error: 'Unable to fetch current price' });
+  if (!quote || quote.error || !quote.price) {
+    return res.status(503).json({ 
+      error: 'Unable to fetch current price',
+      detail: quote?.message || 'Unknown error'
+    });
   }
 
   const position = pairState[targetSymbol].strategy.openPosition(pairState[targetSymbol].lastSetup, quote.price);
@@ -281,7 +369,7 @@ app.post('/api/positions/:id/close', async (req, res) => {
   }
 
   const quote = await tdService.getQuote(targetSymbol);
-  const currentPrice = quote ? quote.price : null;
+  const currentPrice = quote && !quote.error ? quote.price : null;
 
   if (!currentPrice) {
     return res.status(503).json({ error: 'Unable to fetch current price' });
@@ -329,8 +417,7 @@ app.post('/api/control', (req, res) => {
   res.json({ message: `Bot ${action.toLowerCase()}ed successfully`, state: botState });
 });
 
-// ── CATCH-ALL: SERVE index.html FOR SPA ROUTES ──
-// This ensures refreshing the page or visiting any route loads the dashboard
+// ── CATCH-ALL ──
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '../frontend', 'index.html'));
 });
@@ -370,7 +457,7 @@ async function pollMarket() {
       pairState[sym].ohlcvCache = ohlcv;
 
       const quote = await tdService.getQuote(sym);
-      if (quote && quote.price) {
+      if (quote && !quote.error && quote.price) {
         pairState[sym].lastPrice = quote.price;
         pairState[sym].lastCheck = new Date().toISOString();
 
@@ -397,6 +484,7 @@ async function pollMarket() {
     } catch (err) {
       console.error(`[POLL] Error for ${sym}:`, err.message);
     }
+    await new Promise(r => setTimeout(r, 300));
   }
 }
 
@@ -422,11 +510,11 @@ process.on('SIGINT', () => { stopPolling(); process.exit(0); });
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log('╔════════════════════════════════════════════════════════════╗');
-  console.log('║  AUTOMATED TRADING DASHBOARD — SINGLE SERVICE              ║');
-  console.log('║  Frontend + Backend on one Render Web Service              ║');
+  console.log('║  AUTOMATED TRADING DASHBOARD — SINGLE SERVICE            ║');
   console.log('╠════════════════════════════════════════════════════════════╣');
-  console.log(`║  Dashboard: http://localhost:${PORT} (or your Render URL)   ║`);
+  console.log(`║  Dashboard: http://localhost:${PORT}                        ║`);
   console.log(`║  Pairs: ${pairs.join(', ')}          ║`);
+  console.log(`║  API Key: ${API_KEY ? 'CONFIGURED' : 'MISSING — add to env'}                    ║`);
   console.log(`║  Status: ${botState.status}                                       ║`);
   console.log('╚════════════════════════════════════════════════════════════╝');
 });
