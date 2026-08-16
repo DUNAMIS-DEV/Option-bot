@@ -1,8 +1,8 @@
 /**
  * twelveDataService.js
  * ====================
- * Twelve Data API with request queue, caching, and rate limit handling.
- * Prevents HTTP 429 by spacing requests and caching aggressively.
+ * Twelve Data API with request queue, caching, rate limit handling,
+ * AND credit usage tracking from response headers.
  */
 
 const axios = require('axios');
@@ -15,22 +15,28 @@ class TwelveDataService {
     this.lastPrices = new Map();
     this.requestCount = 0;
     this.lastRequestTime = 0;
-    this.minDelayMs = 800; // Minimum 800ms between requests to avoid 429
-    this.cache = new Map(); // symbol -> {quote, ohlcv, timestamp}
-    this.cacheTTL = 30000; // Cache for 30 seconds
+    this.minDelayMs = 800;
+    this.cache = new Map();
+    this.cacheTTL = 30000;
+
+    // Credit tracking
+    this.creditStats = {
+      used: 0,
+      remaining: 0,
+      total: 0,
+      lastUpdated: null,
+      plan: 'Unknown',
+      requestsThisMinute: 0,
+      minuteResetAt: null
+    };
   }
 
-  /**
-   * Rate-limited request wrapper
-   * Ensures we never make requests faster than minDelayMs apart
-   */
   async rateLimitedRequest(requestFn) {
     const now = Date.now();
     const timeSinceLast = now - this.lastRequestTime;
 
     if (timeSinceLast < this.minDelayMs) {
       const wait = this.minDelayMs - timeSinceLast;
-      console.log(`[TwelveData] Rate limit: waiting ${wait}ms`);
       await new Promise(r => setTimeout(r, wait));
     }
 
@@ -38,10 +44,35 @@ class TwelveDataService {
     this.requestCount++;
 
     try {
-      return await requestFn();
+      const response = await requestFn();
+
+      // Track credits from response headers
+      if (response.headers) {
+        const used = response.headers['api-credits-used'];
+        const left = response.headers['api-credits-left'];
+
+        if (used !== undefined && left !== undefined) {
+          this.creditStats.used = parseInt(used) || 0;
+          this.creditStats.remaining = parseInt(left) || 0;
+          this.creditStats.total = this.creditStats.used + this.creditStats.remaining;
+          this.creditStats.lastUpdated = new Date().toISOString();
+        }
+      }
+
+      // Track per-minute requests
+      const now2 = new Date();
+      if (!this.creditStats.minuteResetAt || now2 >= new Date(this.creditStats.minuteResetAt)) {
+        this.creditStats.requestsThisMinute = 0;
+        const nextMinute = new Date(now2);
+        nextMinute.setSeconds(0, 0);
+        nextMinute.setMinutes(nextMinute.getMinutes() + 1);
+        this.creditStats.minuteResetAt = nextMinute.toISOString();
+      }
+      this.creditStats.requestsThisMinute++;
+
+      return response;
     } catch (err) {
       if (err.response && err.response.status === 429) {
-        console.error('[TwelveData] RATE LIMITED (429). Waiting 5s then retrying...');
         await new Promise(r => setTimeout(r, 5000));
         this.lastRequestTime = Date.now();
         return await requestFn();
@@ -62,7 +93,6 @@ class TwelveDataService {
     const key = this.getCacheKey(symbol, type);
     const cached = this.cache.get(key);
     if (cached && Date.now() - cached.timestamp < this.cacheTTL) {
-      console.log(`[TwelveData] Cache HIT for ${symbol} (${type})`);
       return cached.data;
     }
     return null;
@@ -73,8 +103,48 @@ class TwelveDataService {
     this.cache.set(key, { data, timestamp: Date.now() });
   }
 
-  async getTimeSeries(symbol, interval = '1h', outputsize = 100) {
-    // Check cache first
+  getCreditStats() {
+    return { ...this.creditStats };
+  }
+
+  async getApiUsage() {
+    return this.rateLimitedRequest(async () => {
+      try {
+        const url = `${API_BASE}/api_usage`;
+        const params = { apikey: this.apiKey, format: 'JSON' };
+        const response = await axios.get(url, { params, timeout: 10000 });
+
+        if (response.data.status === 'error') {
+          return { error: true, message: response.data.message };
+        }
+
+        const data = response.data;
+        this.creditStats.plan = data.plan || 'Unknown';
+
+        return {
+          plan: data.plan || 'Unknown',
+          apiCreditsUsed: data.api_credits_used || 0,
+          apiCreditsRemaining: data.api_credits_remaining || 0,
+          apiCreditsLimit: data.api_credits_limit || 0,
+          websocketCreditsUsed: data.websocket_credits_used || 0,
+          websocketCreditsRemaining: data.websocket_credits_remaining || 0,
+          websocketCreditsLimit: data.websocket_credits_limit || 0,
+          dailyLimit: data.daily_limit || null,
+          dailyLimitUsed: data.daily_limit_used || null,
+          dailyLimitRemaining: data.daily_limit_remaining || null,
+          minuteLimit: data.minute_limit || null,
+          minuteLimitUsed: data.minute_limit_used || null,
+          minuteLimitRemaining: data.minute_limit_remaining || null,
+          resetTime: data.reset_time || null,
+          resetInSeconds: data.reset_in_seconds || null
+        };
+      } catch (err) {
+        return { error: true, message: err.message };
+      }
+    });
+  }
+
+  async getTimeSeries(symbol, interval = '5min', outputsize = 100) {
     const cached = this.getCached(symbol, `ohlcv_${interval}`);
     if (cached) return cached;
 
@@ -90,11 +160,9 @@ class TwelveDataService {
           format: 'JSON'
         };
 
-        console.log(`[TwelveData] Request #${this.requestCount} - time_series for ${symbol}`);
         const response = await axios.get(url, { params, timeout: 15000 });
 
         if (response.data.status === 'error') {
-          console.error(`[TwelveData] time_series ERROR for ${symbol}:`, response.data.message);
           return [];
         }
 
@@ -103,14 +171,12 @@ class TwelveDataService {
         return values;
 
       } catch (err) {
-        console.error(`[TwelveData] time_series exception for ${symbol}:`, err.message);
         return [];
       }
     });
   }
 
   async getQuote(symbol) {
-    // Check cache first
     const cached = this.getCached(symbol, 'quote');
     if (cached) return cached;
 
@@ -124,11 +190,9 @@ class TwelveDataService {
           format: 'JSON'
         };
 
-        console.log(`[TwelveData] Request #${this.requestCount} - quote for ${symbol}`);
         const response = await axios.get(url, { params, timeout: 10000 });
 
         if (response.data.status === 'error') {
-          console.error(`[TwelveData] quote ERROR for ${symbol}:`, response.data.message);
           return { 
             error: true, 
             message: response.data.message,
@@ -153,11 +217,9 @@ class TwelveDataService {
 
         this.lastPrices.set(symbol, quote);
         this.setCache(symbol, 'quote', quote);
-        console.log(`[TwelveData] quote OK for ${symbol}: ${quote.price}`);
         return quote;
 
       } catch (err) {
-        console.error(`[TwelveData] quote exception for ${symbol}:`, err.message);
         return { error: true, message: err.message, symbol: symbol.replace('/', '') };
       }
     });
@@ -175,7 +237,7 @@ class TwelveDataService {
     return this.rateLimitedRequest(async () => {
       try {
         const url = `${API_BASE}/quote`;
-        const params = { symbol: 'EURUSD', apikey: this.apiKey, format: 'JSON' };
+        const params = { symbol: 'XAUUSD', apikey: this.apiKey, format: 'JSON' };
         const response = await axios.get(url, { params, timeout: 10000 });
 
         if (response.data.status === 'error') {
