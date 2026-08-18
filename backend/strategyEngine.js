@@ -506,7 +506,7 @@ class StrategyEngine {
   }
 
   /**
-      * Manual close a position
+   * Manual close a position
    */
   closePosition(positionId, currentPrice, reason = 'MANUAL') {
     const idx = this.positions.findIndex(p => p.id === positionId);
@@ -528,3 +528,5 @@ class StrategyEngine {
     return pos;
   }
 }
+
+module.exports = StrategyEngine;
