@@ -327,20 +327,21 @@ class StrategyEngine {
     let signal = 'HOLD';
     let confidence = score;
 
-    // Signal logic: Must have trend + healthy RSI + at least 3 passing criteria
     const passedCount = criteria.filter(c => c.passed).length;
 
-    if (passedCount >= 3 && score >= 55) {
-      if (emaBullish && rsi < 70 && (levels.nearSupport || priceAboveFast)) {
+    // Boost confidence for strong setups (done before threshold check so the
+    // boosted score is what gets compared to the 57% cutoff)
+    if (passedCount >= 5) confidence = Math.min(98, confidence + 10);
+    if (emaCrossover && volume.confirmed) confidence = Math.min(99, confidence + 8);
+
+    // Generate a setup for ANY score above 57%, direction from trend bias.
+    if (confidence > 57) {
+      if (emaBullish) {
         signal = 'BUY';
-      } else if (emaBearish && rsi > 30 && (levels.nearResistance || priceBelowFast)) {
+      } else if (emaBearish) {
         signal = 'SELL';
       }
     }
-
-    // Boost confidence for strong setups
-    if (passedCount >= 5) confidence = Math.min(98, confidence + 10);
-    if (emaCrossover && volume.confirmed) confidence = Math.min(99, confidence + 8);
 
     // ── TRADE PARAMETERS (Golden Risk Management Rules) ──
     const atrMultiplier = 1.5;
@@ -505,7 +506,7 @@ class StrategyEngine {
   }
 
   /**
-   * Manual close a position
+      * Manual close a position
    */
   closePosition(positionId, currentPrice, reason = 'MANUAL') {
     const idx = this.positions.findIndex(p => p.id === positionId);
@@ -527,5 +528,3 @@ class StrategyEngine {
     return pos;
   }
 }
-
-module.exports = StrategyEngine;
