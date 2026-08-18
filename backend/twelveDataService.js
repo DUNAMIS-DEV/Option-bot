@@ -13,9 +13,13 @@ class TwelveDataService {
     this.lastPrices = new Map();
     this.requestCount = 0;
     this.lastRequestTime = 0;
-    this.minDelayMs = 800;
+    // Free plan = 8 requests/minute. 60000ms / 8 = 7500ms minimum spacing.
+    // Add a safety margin so we never sit right on the edge of the limit.
+    this.minDelayMs = 8000;
     this.cache = new Map();
-    this.cacheTTL = 30000;
+    // Cache a bit longer than the poll interval so back-to-back manual
+    // "Generate Setup" clicks reuse data instead of firing new requests.
+    this.cacheTTL = 45000;
 
     this.creditStats = {
       used: 0,
@@ -28,7 +32,7 @@ class TwelveDataService {
     };
   }
 
-  async rateLimitedRequest(requestFn) {
+  async rateLimitedRequest(requestFn, retriesLeft = 3) {
     const now = Date.now();
     const timeSinceLast = now - this.lastRequestTime;
     if (timeSinceLast < this.minDelayMs) {
@@ -63,10 +67,15 @@ class TwelveDataService {
 
       return response;
     } catch (err) {
-      if (err.response && err.response.status === 429) {
-        await new Promise(r => setTimeout(r, 5000));
+      if (err.response && err.response.status === 429 && retriesLeft > 0) {
+        // Wait until the top of the next minute (where the free plan's quota
+        // resets) rather than a fixed 5s, since a fixed delay often lands
+        // back in the same still-exhausted minute window.
+        const waitMs = Math.max(this.minDelayMs, 15000);
+        console.warn(`[TwelveData] 429 rate limited — waiting ${waitMs}ms before retry (${retriesLeft} retries left)`);
+        await new Promise(r => setTimeout(r, waitMs));
         this.lastRequestTime = Date.now();
-        return await requestFn();
+        return await this.rateLimitedRequest(requestFn, retriesLeft - 1);
       }
       throw err;
     }
@@ -199,3 +208,4 @@ class TwelveDataService {
 }
 
 module.exports = TwelveDataService;
+            
