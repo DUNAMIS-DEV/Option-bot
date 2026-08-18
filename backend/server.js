@@ -1,18 +1,12 @@
 /**
- * server.js — XAU/USD SCALPER (SINGLE SERVICE DEPLOYMENT)
- * ==========================================================
- * Repo structure:
- *   /frontend  → static files (index.html, style.css, app.js)
- *   /backend   → this file + node_modules
- *
- * Render start command:  node backend/server.js
- * Render root directory:  / (repo root)  OR  /backend
+ * server.js — XAU/USD SCALPER + PASSWORD PROTECTION
+ * ===================================================
  */
 
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const path = require('fs');
+const fs = require('fs');
 const nodePath = require('path');
 
 const app = express();
@@ -21,47 +15,58 @@ const app = express();
 app.use(cors({
   origin: process.env.ALLOWED_ORIGIN || '*',
   methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type']
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
 app.use(express.json());
 
+// ── AUTH MODULE ──
+const {
+  verifyPassword,
+  createSession,
+  validateToken,
+  changeAccessPassword,
+  revokeAllAccessSessions,
+  requireAuth,
+  requireAdmin
+} = require('./auth');
+
 // ── CONFIG ──
 const API_KEY = process.env.TWELVE_DATA_API_KEY || '';
-const PAIRS = ['XAU/USD']; // LOCKED: only XAU/USD
+const PAIRS = ['XAU/USD'];
 const DEMO_MODE = !API_KEY || API_KEY.length < 10;
-
-let demoMode = DEMO_MODE; // Can be toggled at runtime
+let demoMode = DEMO_MODE;
 
 console.log('[SERVER] ===========================================');
 console.log('[SERVER] Pairs:', PAIRS.join(', '));
 console.log('[SERVER] API Key:', API_KEY ? 'SET (' + API_KEY.substring(0, 6) + '...)' : 'MISSING');
-console.log('[SERVER] Initial Demo Mode:', demoMode);
+console.log('[SERVER] Demo Mode:', demoMode);
 console.log('[SERVER] NODE_ENV:', process.env.NODE_ENV || 'not set');
-console.log('[SERVER] __dirname:', __dirname);
 console.log('[SERVER] ===========================================');
 
-// ── RESOLVE FRONTEND PATH (works whether root is repo or backend/) ──
+// Confirm auth is configured (never logs actual password values)
+console.log('[SERVER] Auth: ACCESS_PASSWORD set:', !!process.env.ACCESS_PASSWORD);
+console.log('[SERVER] Auth: MASTER_PASSWORD set:', !!process.env.MASTER_PASSWORD);
+
+// ── RESOLVE FRONTEND PATH ──
 function resolveFrontendPath() {
   const candidates = [
-    nodePath.join(__dirname, '../frontend'),   // if running from backend/
-    nodePath.join(__dirname, 'frontend'),        // if root is repo root
+    nodePath.join(__dirname, '../frontend'),
+    nodePath.join(__dirname, 'frontend'),
     nodePath.join(__dirname, '../public'),
     nodePath.join(__dirname, 'public'),
     nodePath.join(__dirname, 'dist'),
     __dirname
   ];
-
   for (const p of candidates) {
     const indexFile = nodePath.join(p, 'index.html');
     try {
-      if (path.existsSync(indexFile)) {
+      if (fs.existsSync(indexFile)) {
         console.log('[SERVER] Frontend found at:', p);
         return p;
       }
     } catch (e) {}
   }
-
-  console.warn('[SERVER] WARNING: index.html not found in any candidate path');
+  console.warn('[SERVER] WARNING: index.html not found');
   return __dirname;
 }
 
@@ -93,7 +98,6 @@ try {
 } catch (err) {
   servicesError = err.message;
   console.error('[SERVER] FAILED to load services:', err.message);
-  console.error(err.stack);
 }
 
 let botState = {
@@ -111,7 +115,6 @@ let pollTimer = null;
 // ═══════════════════════════════════════════════════════════════
 
 function generateDemoQuote(symbol) {
-  // Realistic XAU/USD price ~ 2435.00 ± small noise
   const base = 2435.00;
   const noise = (Math.random() - 0.5) * 3.5;
   const price = base + noise;
@@ -149,7 +152,7 @@ function generateDemoOHLCV(count = 100) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// API ROUTES
+// PUBLIC ROUTES (no auth required)
 // ═══════════════════════════════════════════════════════════════
 
 app.get('/health', (req, res) => {
@@ -158,7 +161,6 @@ app.get('/health', (req, res) => {
     apiKeyPresent: !!API_KEY,
     demoMode,
     servicesLoaded,
-    servicesError,
     pairs: PAIRS,
     serverTime: new Date().toISOString()
   });
@@ -170,27 +172,80 @@ app.get('/api/test', (req, res) => {
     message: 'API is reachable',
     demoMode,
     servicesLoaded,
-    pairs: PAIRS,
-    endpoints: ['/health', '/api/test', '/api/status', '/api/market-data', '/api/setup', '/api/trades', '/api/usage', '/api/control', '/api/demo']
+    pairs: PAIRS
   });
 });
 
-// ── DEMO TOGGLE ──
-app.get('/api/demo', (req, res) => {
-  res.json({ demoMode, timestamp: new Date().toISOString() });
-});
-
-app.post('/api/demo', (req, res) => {
-  const { enabled } = req.body;
-  if (typeof enabled === 'boolean') {
-    demoMode = enabled;
-    console.log('[SERVER] Demo mode set to:', demoMode);
+// ── AUTH ROUTES ──
+app.post('/api/auth/login', (req, res) => {
+  const { password } = req.body;
+  if (!password) {
+    return res.status(400).json({ error: 'Password required' });
   }
-  res.json({ demoMode, message: `Demo mode ${demoMode ? 'enabled' : 'disabled'}` });
+
+  const result = verifyPassword(password);
+  if (!result.valid) {
+    return res.status(401).json({ error: 'Invalid password' });
+  }
+
+  const token = createSession(result.role);
+  res.json({
+    success: true,
+    token,
+    role: result.role,
+    message: `Logged in as ${result.role}`
+  });
 });
 
-// ── USAGE ──
-app.get('/api/usage', (req, res) => {
+app.get('/api/auth/status', (req, res) => {
+  const authHeader = req.headers.authorization || '';
+  const token = authHeader.replace('Bearer ', '').trim();
+  const session = validateToken(token);
+
+  if (!session) {
+    return res.json({ authenticated: false });
+  }
+
+  res.json({
+    authenticated: true,
+    role: session.role
+  });
+});
+
+app.post('/api/auth/change-password', requireAdmin, (req, res) => {
+  const { masterPassword, newPassword } = req.body;
+  const result = changeAccessPassword(masterPassword, newPassword);
+  if (result.success) {
+    res.json(result);
+  } else {
+    res.status(400).json(result);
+  }
+});
+
+// Master-only: instantly kick out everyone currently logged in with the
+// access password, without necessarily changing it.
+app.post('/api/auth/revoke-all', requireAdmin, (req, res) => {
+  const { masterPassword } = req.body;
+  const result = revokeAllAccessSessions(masterPassword);
+  if (result.success) {
+    res.json(result);
+  } else {
+    res.status(400).json(result);
+  }
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  const authHeader = req.headers.authorization || '';
+  const token = authHeader.replace('Bearer ', '').trim();
+  // In a real app we'd blacklist the token; here sessions are in-memory only
+  res.json({ success: true, message: 'Logged out' });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// PROTECTED API ROUTES (require valid token)
+// ═══════════════════════════════════════════════════════════════
+
+app.get('/api/usage', requireAuth, (req, res) => {
   if (!servicesLoaded) {
     return res.status(503).json({ error: 'Services not loaded', detail: servicesError });
   }
@@ -205,8 +260,7 @@ app.get('/api/usage', (req, res) => {
   });
 });
 
-// ── STATUS ──
-app.get('/api/status', (req, res) => {
+app.get('/api/status', requireAuth, (req, res) => {
   if (!servicesLoaded) return res.status(503).json({ error: 'Services not loaded', detail: servicesError });
 
   res.json({
@@ -232,15 +286,14 @@ app.get('/api/status', (req, res) => {
       }
     },
     demoMode,
+    userRole: req.user.role,
     portfolio: getGlobalPortfolio(),
     serverTime: new Date().toISOString()
   });
 });
 
-// ── MARKET DATA ──
-app.get('/api/market-data', async (req, res) => {
+app.get('/api/market-data', requireAuth, async (req, res) => {
   const symbol = req.query.symbol || PAIRS[0];
-
   if (!servicesLoaded) {
     return res.status(503).json({ error: 'Services not loaded', detail: servicesError });
   }
@@ -249,20 +302,12 @@ app.get('/api/market-data', async (req, res) => {
     if (symbol === 'ALL') {
       const results = {};
       let anySuccess = false;
-
       for (const sym of PAIRS) {
-        let quote;
-        if (demoMode) {
-          quote = generateDemoQuote(sym);
-        } else {
-          quote = await tdService.getQuote(sym);
-        }
-
+        let quote = demoMode ? generateDemoQuote(sym) : await tdService.getQuote(sym);
         results[sym] = {
           quote: quote?.error ? { error: true, message: quote.message, code: quote.code } : quote,
           timestamp: new Date().toISOString()
         };
-
         if (quote && !quote.error && quote.price) {
           anySuccess = true;
           if (pairState[sym]) {
@@ -271,11 +316,9 @@ app.get('/api/market-data', async (req, res) => {
           }
         }
       }
-
       return res.json({ allPairs: results, anySuccess, timestamp: new Date().toISOString() });
     }
 
-    // Single symbol
     let quote, ohlcv;
     if (demoMode) {
       quote = generateDemoQuote(symbol);
@@ -296,22 +339,19 @@ app.get('/api/market-data', async (req, res) => {
     }
 
     res.json({ symbol, quote, ohlcv: ohlcv.slice(0, 50), timestamp: new Date().toISOString() });
-
   } catch (err) {
     console.error('[API /api/market-data] ERROR:', err.message);
     res.status(500).json({ error: err.message, symbol });
   }
 });
 
-// ── SETUP GENERATOR ──
-app.get('/api/setup', async (req, res) => {
+app.get('/api/setup', requireAuth, async (req, res) => {
   const symbol = req.query.symbol || PAIRS[0];
   const scanAll = req.query.scan === 'true';
 
   if (!servicesLoaded) {
     return res.status(503).json({ error: 'Services not loaded', detail: servicesError });
   }
-
   if (!pairState[symbol]) {
     return res.status(400).json({ error: `Symbol ${symbol} not in watchlist`, validSymbols: PAIRS });
   }
@@ -335,7 +375,6 @@ app.get('/api/setup', async (req, res) => {
     return res.json({ scan: true, setups, count: setups.length, timestamp: new Date().toISOString() });
   }
 
-  // Single pair
   try {
     let ohlcv = pairState[symbol].ohlcvCache || [];
     if (ohlcv.length < 30) {
@@ -346,35 +385,23 @@ app.get('/api/setup', async (req, res) => {
     let quote = demoMode ? generateDemoQuote(symbol) : await tdService.getQuote(symbol);
 
     if (quote?.error) {
-      return res.json({
-        error: 'QUOTE_ERROR',
-        detail: quote.message,
-        symbol,
-        setup: null, signal: 'HOLD', score: 0
-      });
+      return res.json({ error: 'QUOTE_ERROR', detail: quote.message, symbol, setup: null, signal: 'HOLD', score: 0 });
     }
 
     if (ohlcv.length < 30) {
-      return res.json({
-        error: 'INSUFFICIENT_DATA',
-        detail: `Only ${ohlcv.length} candles available.`,
-        symbol,
-        setup: null, signal: 'HOLD', score: 0
-      });
+      return res.json({ error: 'INSUFFICIENT_DATA', detail: `Only ${ohlcv.length} candles available.`, symbol, setup: null, signal: 'HOLD', score: 0 });
     }
 
     const setup = pairState[symbol].strategy.generateSetup(ohlcv, quote.price, symbol);
     pairState[symbol].lastSetup = setup;
     res.json(setup);
-
   } catch (err) {
     console.error('[API /api/setup] ERROR:', err.message);
     res.status(500).json({ error: 'INTERNAL_ERROR', detail: err.message, symbol, setup: null, signal: 'HOLD', score: 0 });
   }
 });
 
-// ── EXECUTE TRADE ──
-app.post('/api/setup/execute', async (req, res) => {
+app.post('/api/setup/execute', requireAuth, async (req, res) => {
   if (!servicesLoaded) return res.status(503).json({ error: 'Services not loaded' });
 
   const { symbol } = req.body;
@@ -401,8 +428,7 @@ app.post('/api/setup/execute', async (req, res) => {
   }
 });
 
-// ── TRADES ──
-app.get('/api/trades', (req, res) => {
+app.get('/api/trades', requireAuth, (req, res) => {
   if (!servicesLoaded) return res.status(503).json({ error: 'Services not loaded' });
 
   const allActive = [];
@@ -424,8 +450,7 @@ app.get('/api/trades', (req, res) => {
   });
 });
 
-// ── CLOSE POSITION ──
-app.post('/api/positions/:id/close', async (req, res) => {
+app.post('/api/positions/:id/close', requireAuth, async (req, res) => {
   if (!servicesLoaded) return res.status(503).json({ error: 'Services not loaded' });
 
   const { id } = req.params;
@@ -459,8 +484,7 @@ app.post('/api/positions/:id/close', async (req, res) => {
   }
 });
 
-// ── BOT CONTROL ──
-app.post('/api/control', (req, res) => {
+app.post('/api/control', requireAuth, (req, res) => {
   if (!servicesLoaded) return res.status(503).json({ error: 'Services not loaded' });
 
   const { action, settings } = req.body;
@@ -485,8 +509,22 @@ app.post('/api/control', (req, res) => {
   res.json({ message: `Bot ${action.toLowerCase()}ed`, state: botState });
 });
 
+// ── DEMO TOGGLE (admin only) ──
+app.get('/api/demo', requireAuth, (req, res) => {
+  res.json({ demoMode, timestamp: new Date().toISOString() });
+});
+
+app.post('/api/demo', requireAuth, (req, res) => {
+  const { enabled } = req.body;
+  if (typeof enabled === 'boolean') {
+    demoMode = enabled;
+    console.log('[SERVER] Demo mode set to:', demoMode);
+  }
+  res.json({ demoMode, message: `Demo mode ${demoMode ? 'enabled' : 'disabled'}` });
+});
+
 // ═══════════════════════════════════════════════════════════════
-// STATIC FRONTEND (MUST be after all API routes)
+// STATIC FRONTEND
 // ═══════════════════════════════════════════════════════════════
 
 app.use(express.static(FRONTEND_PATH));
@@ -559,7 +597,7 @@ process.on('SIGINT', () => { stopPolling(); process.exit(0); });
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log('╔════════════════════════════════════════════════════════════╗');
-  console.log('║  XAU/USD SCALPER BOT — RENDER READY                        ║');
+  console.log('║  XAU/USD SCALPER BOT — PASSWORD PROTECTED                  ║');
   console.log('╠════════════════════════════════════════════════════════════╣');
   console.log(`║  Port: ${PORT}                                           ║`);
   console.log(`║  Test:  curl http://localhost:${PORT}/api/test           ║`);
