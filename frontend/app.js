@@ -1,6 +1,6 @@
 /**
- * app.js — XAU/USD SCALPER + DEMO MODE
- * =====================================
+ * app.js — XAU/USD SCALPER + AUTH + DEMO MODE
+ * ============================================
  */
 
 const API_BASE = '';
@@ -11,6 +11,8 @@ const state = {
   timeframe: '5min',
   botActive: false,
   demoMode: false,
+  authToken: null,
+  userRole: null,
   lastSetup: null,
   lastSetupSymbol: null,
   signals: [],
@@ -30,6 +32,27 @@ PAIRS.forEach(sym => {
 });
 
 const els = {
+  // Auth
+  loginOverlay: document.getElementById('loginOverlay'),
+  loginPassword: document.getElementById('loginPassword'),
+  loginBtn: document.getElementById('loginBtn'),
+  loginForm: document.getElementById('loginForm'),
+  loginError: document.getElementById('loginError'),
+  logoutBtn: document.getElementById('logoutBtn'),
+  userBadge: document.getElementById('userBadge'),
+  userRole: document.getElementById('userRole'),
+  // Admin modal
+  changePasswordModal: document.getElementById('changePasswordModal'),
+  adminSettingsBtn: document.getElementById('adminSettingsBtn'),
+  closePasswordModal: document.getElementById('closePasswordModal'),
+  cancelPasswordChange: document.getElementById('cancelPasswordChange'),
+  savePasswordChange: document.getElementById('savePasswordChange'),
+  masterPasswordConfirm: document.getElementById('masterPasswordConfirm'),
+  newAccessPassword: document.getElementById('newAccessPassword'),
+  confirmAccessPassword: document.getElementById('confirmAccessPassword'),
+  passwordModalError: document.getElementById('passwordModalError'),
+  passwordModalSuccess: document.getElementById('passwordModalSuccess'),
+  // Dashboard
   statusDot: document.getElementById('statusDot'),
   statusText: document.getElementById('statusText'),
   botToggle: document.getElementById('botToggle'),
@@ -77,13 +100,38 @@ const els = {
 };
 
 // ═══════════════════════════════════════════════════════════════
-// API HELPERS
+// AUTH HELPERS
+// ═══════════════════════════════════════════════════════════════
+
+function getToken() {
+  return sessionStorage.getItem('authToken');
+}
+
+function setToken(token) {
+  state.authToken = token;
+  if (token) {
+    sessionStorage.setItem('authToken', token);
+  } else {
+    sessionStorage.removeItem('authToken');
+  }
+}
+
+function getAuthHeaders() {
+  const token = getToken();
+  return {
+    'Content-Type': 'application/json',
+    ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════
+// API HELPERS (with auth headers)
 // ═══════════════════════════════════════════════════════════════
 
 async function apiGet(endpoint) {
   console.log(`[FRONTEND] GET ${endpoint}`);
   const res = await fetch(`${API_BASE}${endpoint}`, {
-    headers: { 'Content-Type': 'application/json' }
+    headers: getAuthHeaders()
   });
 
   let data = {};
@@ -91,6 +139,13 @@ async function apiGet(endpoint) {
     data = await res.json();
   } catch (e) {
     data = { error: 'Invalid JSON response from server' };
+  }
+
+  if (res.status === 401) {
+    handleUnauthorized();
+    const err = new Error('Session expired. Please log in again.');
+    err.status = 401;
+    throw err;
   }
 
   if (!res.ok) {
@@ -106,7 +161,7 @@ async function apiPost(endpoint, body) {
   console.log(`[FRONTEND] POST ${endpoint}`, body);
   const res = await fetch(`${API_BASE}${endpoint}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getAuthHeaders(),
     body: JSON.stringify(body)
   });
 
@@ -117,6 +172,13 @@ async function apiPost(endpoint, body) {
     data = { error: 'Invalid JSON response from server' };
   }
 
+  if (res.status === 401) {
+    handleUnauthorized();
+    const err = new Error('Session expired. Please log in again.');
+    err.status = 401;
+    throw err;
+  }
+
   if (!res.ok) {
     const err = new Error(data.detail || data.error || data.message || `HTTP ${res.status}`);
     err.status = res.status;
@@ -124,6 +186,153 @@ async function apiPost(endpoint, body) {
     throw err;
   }
   return data;
+}
+
+function handleUnauthorized() {
+  setToken(null);
+  state.userRole = null;
+  showLoginOverlay();
+  showToast('Session expired. Please log in again.', 'warning');
+}
+
+// ═══════════════════════════════════════════════════════════════
+// LOGIN / LOGOUT
+// ═══════════════════════════════════════════════════════════════
+
+function showLoginOverlay() {
+  els.loginOverlay.classList.remove('hidden');
+  els.loginPassword.value = '';
+  els.loginError.textContent = '';
+  els.loginPassword.focus();
+}
+
+function hideLoginOverlay() {
+  els.loginOverlay.classList.add('hidden');
+}
+
+async function attemptLogin() {
+  const password = els.loginPassword.value.trim();
+  if (!password) {
+    els.loginError.textContent = 'Please enter a password';
+    return;
+  }
+
+  els.loginBtn.disabled = true;
+  els.loginBtn.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg> Checking...`;
+
+  try {
+    const res = await fetch(`${API_BASE}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password })
+    });
+
+    const data = await res.json();
+
+    if (!res.ok || !data.success) {
+      els.loginError.textContent = data.error || 'Invalid password';
+      els.loginPassword.value = '';
+      els.loginPassword.focus();
+      return;
+    }
+
+    setToken(data.token);
+    state.userRole = data.role;
+    els.loginError.textContent = '';
+    hideLoginOverlay();
+    updateUserUI();
+    showToast(`Welcome! Logged in as ${data.role.toUpperCase()}`, 'success');
+
+    // Start dashboard
+    await initDashboard();
+
+  } catch (err) {
+    els.loginError.textContent = 'Connection error. Try again.';
+    console.error('[FRONTEND] Login error:', err);
+  } finally {
+    els.loginBtn.disabled = false;
+    els.loginBtn.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg> Unlock`;
+  }
+}
+
+function logout() {
+  setToken(null);
+  state.userRole = null;
+  location.reload();
+}
+
+function updateUserUI() {
+  if (state.userRole) {
+    els.userBadge.style.display = 'flex';
+    els.userRole.textContent = state.userRole;
+    els.userRole.style.color = state.userRole === 'admin' ? 'var(--blue)' : 'var(--green)';
+
+    // Show admin settings button only for admin
+    if (state.userRole === 'admin') {
+      els.adminSettingsBtn.style.display = 'flex';
+    } else {
+      els.adminSettingsBtn.style.display = 'none';
+    }
+  } else {
+    els.userBadge.style.display = 'none';
+    els.adminSettingsBtn.style.display = 'none';
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// CHANGE PASSWORD MODAL
+// ═══════════════════════════════════════════════════════════════
+
+function openPasswordModal() {
+  els.changePasswordModal.style.display = 'flex';
+  els.masterPasswordConfirm.value = '';
+  els.newAccessPassword.value = '';
+  els.confirmAccessPassword.value = '';
+  els.passwordModalError.textContent = '';
+  els.passwordModalSuccess.textContent = '';
+  els.newAccessPassword.focus();
+}
+
+function closePasswordModalFn() {
+  els.changePasswordModal.style.display = 'none';
+}
+
+async function saveNewPassword() {
+  const masterPass = els.masterPasswordConfirm.value;
+  const newPass = els.newAccessPassword.value;
+  const confirmPass = els.confirmAccessPassword.value;
+
+  els.passwordModalError.textContent = '';
+  els.passwordModalSuccess.textContent = '';
+
+  if (!masterPass) {
+    els.passwordModalError.textContent = 'Master password is required';
+    return;
+  }
+  if (!newPass || newPass.length < 4) {
+    els.passwordModalError.textContent = 'Password must be at least 4 characters';
+    return;
+  }
+  if (newPass !== confirmPass) {
+    els.passwordModalError.textContent = 'Passwords do not match';
+    return;
+  }
+
+  try {
+    const data = await apiPost('/api/auth/change-password', { masterPassword: masterPass, newPassword: newPass });
+    // Clear the master password field regardless of outcome — never leave it sitting in the DOM.
+    els.masterPasswordConfirm.value = '';
+    if (data.success) {
+      els.passwordModalSuccess.textContent = data.message;
+      setTimeout(closePasswordModalFn, 1500);
+      showToast('Access password updated — previous sessions revoked', 'success');
+    } else {
+      els.passwordModalError.textContent = data.error || 'Failed to update password';
+    }
+  } catch (err) {
+    els.masterPasswordConfirm.value = '';
+    els.passwordModalError.textContent = err.message || 'Failed to update password';
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -136,7 +345,6 @@ async function checkHealth() {
     els.statusDot.className = 'status-dot online';
     els.statusText.textContent = data.apiKeyPresent ? 'Online' : 'No API Key';
 
-    // Sync demo mode from server
     if (typeof data.demoMode === 'boolean') {
       state.demoMode = data.demoMode;
       els.demoToggle.checked = state.demoMode;
@@ -162,7 +370,7 @@ async function checkHealth() {
 function updateDemoUI() {
   els.demoStatus.textContent = state.demoMode ? 'ON' : 'OFF';
   els.demoStatus.className = 'toggle-status demo-status ' + (state.demoMode ? 'on' : '');
-  els.liveBadge.textContent = state.demoMode ? '● DEMO' : '● LIVE';
+  els.liveBadge.textContent = state.demoMode ? '&#9679; DEMO' : '&#9679; LIVE';
   els.liveBadge.className = state.demoMode ? 'live-badge demo' : 'live-badge';
   document.querySelector('.card-setup')?.classList.toggle('demo-active', state.demoMode);
 }
@@ -174,7 +382,6 @@ async function toggleDemo() {
     state.demoMode = enabled;
     updateDemoUI();
     showToast(`Demo mode ${enabled ? 'enabled' : 'disabled'}`, 'info');
-    // Refresh data immediately
     await loadAllMarketData();
     await loadApiUsage();
   } catch (err) {
@@ -223,7 +430,6 @@ async function loadAllMarketData() {
         const pairData = data.allPairs[sym];
         if (pairData) {
           const q = pairData.quote;
-
           if (q && !q.error && q.price) {
             state.pairs[sym].price = q.price;
             state.pairs[sym].change = q.change;
@@ -330,7 +536,7 @@ async function generateSetup(symbol) {
 
     if (setup.error) {
       if (setup.error === 'MARKET_CLOSED') {
-        showToast(`Market Closed: ${setup.detail || 'XAU/USD is closed. Try again after 6pm EST Sunday.'}`, 'warning', 8000);
+        showToast(`Market Closed: ${setup.detail || 'XAU/USD is closed.'}`, 'warning', 8000);
         resetGenerateBtn();
         return;
       }
@@ -380,10 +586,12 @@ function handleApiError(err, context) {
 
   console.error(`[FRONTEND] ${context} error:`, { status, message: msg, response: err.response });
 
-  if (status === 404) {
+  if (status === 401) {
+    showToast('Session expired. Please log in again.', 'warning', 6000);
+  } else if (status === 404) {
     showToast('Server endpoint not found. Check deployment.', 'error', 8000);
   } else if (status === 429 || msg.includes('429') || msg.includes('rate')) {
-    showToast('Rate limited by Twelve Data. Wait 30s and try again.', 'warning', 6000);
+    showToast('Rate limited. Wait 30s and try again.', 'warning', 6000);
   } else if (status === 503) {
     showToast(`Service unavailable: ${msg}`, 'error', 6000);
   } else if (msg.includes('market') || msg.includes('closed')) {
@@ -481,26 +689,11 @@ function renderSetup(setup) {
   const detailsHTML = `
     <div class="detail-item"><span class="detail-label">Pair</span><span class="detail-value">${setup.symbol}</span></div>
     <div class="detail-item"><span class="detail-label">Current Price</span><span class="detail-value">${setup.currentPrice?.toFixed(decimals) || '--'}</span></div>
-    <div class="detail-item"><span class="detail-label">Suggested Entry</span><span class="detail-value">${setup.suggestedEntry?.toFixed(decimals) || '--'}</span></div>
-    <div class="detail-item"><span class="detail-label">Stop Loss</span><span class="detail-value negative">${setup.stopLoss?.toFixed(decimals) || '--'}</span></div>
-    <div class="detail-item"><span class="detail-label">Take Profit</span><span class="detail-value positive">${setup.takeProfit?.toFixed(decimals) || '--'}</span></div>
-    <div class="detail-item"><span class="detail-label">R/R Ratio</span><span class="detail-value">${setup.riskRewardRatio || '--'}</span></div>
-    <div class="detail-item"><span class="detail-label">Position Size</span><span class="detail-value">${setup.positionSize || '--'}</span></div>
+    <div class="detail-item"><span class="detail-label">Direction</span><span class="detail-value">${setup.signal}</span></div>
+    <div class="detail-item"><span class="detail-label">Setup %</span><span class="detail-value">${setup.score}%</span></div>
+    <div class="detail-item"><span class="detail-label">Criteria Fulfilled</span><span class="detail-value">${setup.passedCriteria}/${setup.totalCriteria}</span></div>
   `;
   els.setupDetails.innerHTML = detailsHTML;
-
-  if (setup.criteria) {
-    const criteriaHTML = setup.criteria.map(c => `
-      <div class="criteria-item ${c.passed ? 'passed' : 'failed'}">
-        <div class="criteria-icon">${c.passed ? '✓' : '✕'}</div>
-        <div class="criteria-info">
-          <span class="criteria-name">${c.name}</span>
-          <span class="criteria-desc">${c.detail || c.description || ''}</span>
-        </div>
-      </div>
-    `).join('');
-    els.setupDetails.innerHTML += `<div class="criteria-list">${criteriaHTML}</div>`;
-  }
 }
 
 function animateNumber(el, target) {
@@ -618,8 +811,8 @@ function addSignalToLog(setup) {
   div.innerHTML = `
     <span class="signal-time">${time}</span>
     <div class="signal-info">
-      <div class="signal-symbol">${setup.symbol} — ${setup.signal}</div>
-      <div class="signal-detail">Entry: ${setup.suggestedEntry?.toFixed(decimals)} | SL: ${setup.stopLoss?.toFixed(decimals)} | TP: ${setup.takeProfit?.toFixed(decimals)}</div>
+      <div class="signal-symbol">${setup.symbol} &mdash; ${setup.signal}</div>
+      <div class="signal-detail">Price: ${setup.currentPrice?.toFixed(decimals)} | Criteria: ${setup.passedCriteria}/${setup.totalCriteria}</div>
     </div>
     <span class="signal-score ${setup.score >= 70 ? 'high' : setup.score >= 45 ? 'medium' : 'low'}">${setup.score}%</span>
   `;
@@ -683,7 +876,6 @@ async function loadStatus() {
       els.paramMaxPos.textContent = status.strategy.riskRules.maxPositions;
     }
 
-    // Sync demo mode from server
     if (typeof status.demoMode === 'boolean') {
       state.demoMode = status.demoMode;
       els.demoToggle.checked = state.demoMode;
@@ -781,12 +973,23 @@ function showToast(message, type = 'info', duration = 4000) {
 // EVENT LISTENERS
 // ═══════════════════════════════════════════════════════════════
 
+els.loginForm.addEventListener('submit', (e) => {
+  e.preventDefault();
+  attemptLogin();
+});
+
+els.logoutBtn.addEventListener('click', logout);
 els.generateBtn.addEventListener('click', () => generateSetup());
 els.executeBtn.addEventListener('click', executeTrade);
 els.refreshTrades.addEventListener('click', loadTrades);
 els.botToggle.addEventListener('change', toggleBot);
 els.scanAllBtn.addEventListener('click', scanAllPairs);
 els.demoToggle.addEventListener('change', toggleDemo);
+
+els.adminSettingsBtn.addEventListener('click', openPasswordModal);
+els.closePasswordModal.addEventListener('click', closePasswordModalFn);
+els.cancelPasswordChange.addEventListener('click', closePasswordModalFn);
+els.savePasswordChange.addEventListener('click', saveNewPassword);
 
 els.setupPairSelect.addEventListener('change', (e) => {
   els.setupSymbolLabel.textContent = e.target.value;
@@ -801,8 +1004,8 @@ els.timeframeSelect.addEventListener('change', (e) => {
 // INIT
 // ═══════════════════════════════════════════════════════════════
 
-async function init() {
-  console.log('[FRONTEND] Initializing XAU/USD Scalper...');
+async function initDashboard() {
+  console.log('[FRONTEND] Initializing dashboard...');
 
   renderPairsGrid();
 
@@ -821,7 +1024,30 @@ async function init() {
   setInterval(loadTrades, 15000);
   setInterval(loadApiUsage, 10000);
 
-  console.log('[FRONTEND] Initialization complete');
+  console.log('[FRONTEND] Dashboard initialized');
+}
+
+async function init() {
+  // Check for existing session
+  const savedToken = getToken();
+  if (savedToken) {
+    try {
+      const status = await apiGet('/api/auth/status');
+      if (status.authenticated) {
+        state.userRole = status.role;
+        hideLoginOverlay();
+        updateUserUI();
+        await initDashboard();
+        return;
+      }
+    } catch (err) {
+      console.log('[FRONTEND] Saved token invalid, showing login');
+      setToken(null);
+    }
+  }
+
+  // No valid session — show login
+  showLoginOverlay();
 }
 
 init();
