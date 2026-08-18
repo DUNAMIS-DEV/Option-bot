@@ -334,11 +334,11 @@ class StrategyEngine {
     if (passedCount >= 5) confidence = Math.min(98, confidence + 10);
     if (emaCrossover && volume.confirmed) confidence = Math.min(99, confidence + 8);
 
-    // Generate a setup for ANY score above 57%, direction from trend bias.
+    // Above 57% → always BUY or SELL, never HOLD. Below/equal 57% → HOLD.
     if (confidence > 57) {
-      if (emaBullish) {
+      if (emaFastCurrent >= emaSlowCurrent) {
         signal = 'BUY';
-      } else if (emaBearish) {
+      } else {
         signal = 'SELL';
       }
     }
