@@ -439,8 +439,9 @@ async function loadAllMarketData() {
             updatePairCard(sym, q);
           } else if (q && q.error) {
             console.warn(`[FRONTEND] Quote error for ${sym}:`, q.message);
-            state.marketStatus = q.marketClosed ? 'closed' : 'error';
-            showMarketStatus(sym, q.marketClosed ? 'closed' : 'error', q.message);
+            const rateLimited = isRateLimitMessage(q.message);
+            state.marketStatus = q.marketClosed ? 'closed' : (rateLimited ? 'rate_limited' : 'error');
+            showMarketStatus(sym, q.marketClosed ? 'closed' : (rateLimited ? 'rate_limited' : 'error'), q.message);
           }
         }
       });
@@ -449,12 +450,12 @@ async function loadAllMarketData() {
     if (!data.anySuccess) {
       console.warn('[FRONTEND] No successful market data');
       if (data.lastError) {
-        showMarketStatus('XAU/USD', 'error', data.lastError);
+        showMarketStatus('XAU/USD', isRateLimitMessage(data.lastError) ? 'rate_limited' : 'error', data.lastError);
       }
     }
   } catch (err) {
     console.error('[FRONTEND] Market data error:', err.message);
-    showMarketStatus('XAU/USD', 'error', err.message);
+    showMarketStatus('XAU/USD', isRateLimitMessage(err.message) ? 'rate_limited' : 'error', err.message);
   }
 }
 
@@ -496,16 +497,20 @@ function showMarketStatus(sym, status, message) {
   const card = document.getElementById(`pair-${id}`);
   const lastSigEl = document.getElementById(`lastsig-${id}`);
 
+  const isRateLimited = status === 'rate_limited';
+  const isClosed = status === 'closed';
+
   if (priceEl) {
-    priceEl.textContent = status === 'closed' ? 'Market Closed' : 'Error';
-    priceEl.style.color = status === 'closed' ? 'var(--yellow)' : 'var(--red)';
+    priceEl.textContent = isClosed ? 'Market Closed' : (isRateLimited ? 'Limit Reached' : 'Error');
+    priceEl.style.color = isClosed ? 'var(--yellow)' : (isRateLimited ? 'var(--yellow)' : 'var(--red)');
     priceEl.style.fontSize = '1rem';
   }
 
   if (changeEl) {
-    changeEl.textContent = status === 'closed' ? 'Sunday — opens 6pm EST' : (message || 'Connection error');
+    changeEl.textContent = isClosed ? 'Sunday — opens 6pm EST' :
+      (isRateLimited ? 'Daily data limit reached — resets at midnight UTC' : (message || 'Connection error'));
     changeEl.className = 'pair-change';
-    changeEl.style.color = status === 'closed' ? 'var(--yellow)' : 'var(--red)';
+    changeEl.style.color = isClosed ? 'var(--yellow)' : (isRateLimited ? 'var(--yellow)' : 'var(--red)');
   }
 
   if (card) {
@@ -514,9 +519,19 @@ function showMarketStatus(sym, status, message) {
   }
 
   if (lastSigEl) {
-    lastSigEl.textContent = status === 'closed' ? 'Markets closed — setups unavailable' : (message || 'Error fetching data');
-    lastSigEl.style.color = status === 'closed' ? 'var(--yellow)' : 'var(--red)';
+    lastSigEl.textContent = isClosed ? 'Markets closed — setups unavailable' :
+      (isRateLimited ? 'Limit reached for today — try again tomorrow' : (message || 'Error fetching data'));
+    lastSigEl.style.color = isClosed ? 'var(--yellow)' : (isRateLimited ? 'var(--yellow)' : 'var(--red)');
   }
+}
+
+// A 429 from Twelve Data means either the per-minute or the per-day credit
+// cap has been hit. Since the app throttles per-minute spacing itself,
+// a 429 in practice almost always means the daily cap — message it as such.
+function isRateLimitMessage(message) {
+  if (!message) return false;
+  const m = String(message).toLowerCase();
+  return m.includes('429') || m.includes('rate limit') || m.includes('credits');
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -545,8 +560,12 @@ async function generateSetup(symbol) {
         resetGenerateBtn();
         return;
       }
-      if (setup.error === 'QUOTE_ERROR') {
-        showToast(`Data error: ${setup.detail}`, 'error', 6000);
+        if (setup.error === 'QUOTE_ERROR') {
+        if (isRateLimitMessage(setup.detail)) {
+          showToast('Daily data limit reached — try again after midnight UTC.', 'warning', 8000);
+        } else {
+          showToast(`Data error: ${setup.detail}`, 'error', 6000);
+        }
         resetGenerateBtn();
         return;
       }
@@ -590,8 +609,8 @@ function handleApiError(err, context) {
     showToast('Session expired. Please log in again.', 'warning', 6000);
   } else if (status === 404) {
     showToast('Server endpoint not found. Check deployment.', 'error', 8000);
-  } else if (status === 429 || msg.includes('429') || msg.includes('rate')) {
-    showToast('Rate limited. Wait 30s and try again.', 'warning', 6000);
+  } else if (status === 429 || msg.includes('429') || msg.includes('rate') || msg.includes('credits')) {
+    showToast('Daily data limit reached — try again after midnight UTC.', 'warning', 8000);
   } else if (status === 503) {
     showToast(`Service unavailable: ${msg}`, 'error', 6000);
   } else if (msg.includes('market') || msg.includes('closed')) {
@@ -972,7 +991,6 @@ function showToast(message, type = 'info', duration = 4000) {
 // ═══════════════════════════════════════════════════════════════
 // EVENT LISTENERS
 // ═══════════════════════════════════════════════════════════════
-
 els.loginForm.addEventListener('submit', (e) => {
   e.preventDefault();
   attemptLogin();
