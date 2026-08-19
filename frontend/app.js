@@ -869,11 +869,11 @@ async function loadStatus() {
     els.botStatus.className = 'toggle-status ' + (state.botActive ? 'active' : '');
 
     if (status.strategy) {
-      els.paramEmaFast.textContent = status.strategy.indicators.emaFast;
-      els.paramEmaSlow.textContent = status.strategy.indicators.emaSlow;
-      els.paramRsi.textContent = status.strategy.indicators.rsiPeriod;
-      els.paramRisk.textContent = status.strategy.riskRules.maxRiskPerTrade;
-      els.paramMaxPos.textContent = status.strategy.riskRules.maxPositions;
+      if (els.paramEmaFast) els.paramEmaFast.textContent = status.strategy.indicators.sarStep;
+      if (els.paramEmaSlow) els.paramEmaSlow.textContent = status.strategy.indicators.sarMax;
+      if (els.paramRsi) els.paramRsi.textContent = status.strategy.indicators.donchianPeriod;
+      if (els.paramRisk) els.paramRisk.textContent = status.strategy.riskRules.maxRiskPerTrade;
+      if (els.paramMaxPos) els.paramMaxPos.textContent = status.strategy.riskRules.maxPositions;
     }
 
     if (typeof status.demoMode === 'boolean') {
