@@ -1,40 +1,43 @@
 /**
  * strategyEngine.js
  * =================
- * Modular trading strategy engine derived from the YouTube course:
- * "ULTIMATE Options Trading Course for Beginners (Step-by-Step)"
- * 
- * STRATEGY FRAMEWORK (3-Step Process from transcript):
- * ----------------------------------------------------
- * STEP 1 - MARKET DIRECTION (Trend Analysis)
- *   ├─ EMA 9/21 Crossover → Identify trend direction
- *   ├─ Price vs EMA 21 → Confirm trend strength
- *   └─ ADX (implied) → Measure trend strength
- * 
- * STEP 2 - SETUP & ENTRY (Confluence Criteria)
- *   ├─ RSI Momentum Filter → Avoid overbought/oversold entries
- *   ├─ Support/Resistance Key Levels → Entry near S/R
- *   ├─ Volume Confirmation → Validate move with volume
- *   └─ Greeks Awareness (Delta direction, Theta time decay)
- * 
- * STEP 3 - RISK MANAGEMENT (Golden Rules from transcript)
- *   ├─ Stop Loss: Fixed % or ATR-based
- *   ├─ Take Profit: 2:1 R/R minimum
- *   ├─ Position Sizing: Max 2% risk per trade
- *   └─ Max 3 concurrent positions
+ * Strategy: Parabolic SAR + Donchian Channel (middle line) confluence
+ * Source: "1 MINUTE Pocket Option Strategy" — Steven Day Trader
+ *
+ * RULES (from the video):
+ * ------------------------------------------------------------------
+ * 1) Parabolic SAR (acceleration 0.03, max 0.3)
+ *      Dots BELOW price → uptrend  → bullish bias
+ *      Dots ABOVE price → downtrend → bearish bias
+ *
+ * 2) Donchian Channel, period 10, MIDDLE LINE only
+ *      Price crosses midline TOP → BOTTOM → reversal to downtrend → bearish
+ *      Price crosses midline BOTTOM → TOP → reversal to uptrend → bullish
+ *
+ * 3) Entry: both signals agreeing in the same direction = strongest setup.
+ *    Either signal alone still counts, just worth less.
+ *
+ * SCORING (each worth 50% of the total):
+ *   - SAR agrees with the resolved direction        → +50%   (0% if it disagrees)
+ *   - Donchian agrees with the resolved direction    → +50%   (0% if it disagrees)
+ *   - A *fresh* crossover/flip on either indicator (vs the previous candle)
+ *     adds a small bonus on top, since the video treats a fresh cross as
+ *     the strongest form of that signal.
+ *   Direction is resolved by whichever indicator is currently bullish/bearish;
+ *   if they disagree, direction follows the fresher of the two signals but
+ *   score stays low since only one side agrees.
  */
 
 class StrategyEngine {
   constructor(config = {}) {
-    // Strategy parameters (from .env or defaults)
-    this.emaFast = parseInt(config.EMA_FAST_PERIOD || 9);
-    this.emaSlow = parseInt(config.EMA_SLOW_PERIOD || 21);
-    this.rsiPeriod = parseInt(config.RSI_PERIOD || 14);
-    this.rsiOverbought = parseInt(config.RSI_OVERBOUGHT || 70);
-    this.rsiOversold = parseInt(config.RSI_OVERSOLD || 30);
-    this.volumeMaPeriod = parseInt(config.VOLUME_MA_PERIOD || 20);
+    // Parabolic SAR parameters (from the video: accel 0.03, max 0.3)
+    this.sarStep = parseFloat(config.SAR_STEP || 0.03);
+    this.sarMax = parseFloat(config.SAR_MAX || 0.3);
 
-    // Risk parameters (Golden Rules)
+    // Donchian Channel period (from the video: period 10)
+    this.donchianPeriod = parseInt(config.DONCHIAN_PERIOD || 10);
+
+    // Risk parameters (Golden Rules) — unchanged
     this.maxRiskPerTrade = parseFloat(config.MAX_RISK_PER_TRADE_PCT || 2.0);
     this.defaultSlPct = parseFloat(config.DEFAULT_STOP_LOSS_PCT || 1.5);
     this.defaultTpPct = parseFloat(config.DEFAULT_TAKE_PROFIT_PCT || 3.0);
@@ -52,57 +55,90 @@ class StrategyEngine {
   // =========================================================================
 
   /**
-   * Calculate Exponential Moving Average
-   * Used in transcript framework for trend identification (Step 1)
+   * Parabolic SAR
+   * Returns an array (chronological order, same length as input) of
+   * { sar, trend: 'up' | 'down' } for each candle.
+   * Standard Wilder/AFL implementation.
    */
-  calculateEMA(data, period) {
-    const k = 2 / (period + 1);
-    let ema = parseFloat(data[data.length - 1].close);
-    const emaValues = [ema];
+  calculateParabolicSAR(chronological) {
+    const len = chronological.length;
+    const result = new Array(len);
+    if (len < 2) return result;
 
-    for (let i = data.length - 2; i >= 0; i--) {
-      const close = parseFloat(data[i].close);
-      ema = close * k + ema * (1 - k);
-      emaValues.unshift(ema);
+    const high = i => parseFloat(chronological[i].high);
+    const low = i => parseFloat(chronological[i].low);
+
+    // Seed: assume uptrend if the second candle's close is higher than the first's
+    let trend = parseFloat(chronological[1].close) >= parseFloat(chronological[0].close) ? 'up' : 'down';
+    let af = this.sarStep;
+    let ep = trend === 'up' ? high(0) : low(0); // extreme point
+    let sar = trend === 'up' ? low(0) : high(0);
+
+    result[0] = { sar, trend };
+
+    for (let i = 1; i < len; i++) {
+      let prevSar = sar;
+      sar = prevSar + af * (ep - prevSar);
+
+      if (trend === 'up') {
+        // SAR can't be above the prior two candles' lows
+        const clampLow = Math.min(low(i - 1), i >= 2 ? low(i - 2) : low(i - 1));
+        if (sar > clampLow) sar = clampLow;
+
+        if (low(i) < sar) {
+          // Flip to downtrend
+          trend = 'down';
+          sar = ep;
+          ep = low(i);
+          af = this.sarStep;
+        } else {
+          if (high(i) > ep) {
+            ep = high(i);
+            af = Math.min(af + this.sarStep, this.sarMax);
+          }
+        }
+      } else {
+        // downtrend: SAR can't be below the prior two candles' highs
+        const clampHigh = Math.max(high(i - 1), i >= 2 ? high(i - 2) : high(i - 1));
+        if (sar < clampHigh) sar = clampHigh;
+
+        if (high(i) > sar) {
+          // Flip to uptrend
+          trend = 'up';
+          sar = ep;
+          ep = high(i);
+          af = this.sarStep;
+        } else {
+          if (low(i) < ep) {
+            ep = low(i);
+            af = Math.min(af + this.sarStep, this.sarMax);
+          }
+        }
+      }
+
+      result[i] = { sar, trend };
     }
-    return emaValues;
+
+    return result;
   }
 
   /**
-   * Calculate RSI (Relative Strength Index)
-   * Transcript: "RSI measures momentum — avoid buying when overbought"
+   * Donchian Channel — returns { upper, lower, middle } for the given period,
+   * computed from the `period` candles ending at index `endIdx` (chronological array).
    */
-  calculateRSI(data, period = 14) {
-    if (data.length < period + 1) return 50;
-
-    let gains = 0, losses = 0;
-
-    for (let i = data.length - period - 1; i < data.length - 1; i++) {
-      const change = parseFloat(data[i].close) - parseFloat(data[i + 1].close);
-      if (change > 0) gains += change;
-      else losses += Math.abs(change);
-    }
-
-    const avgGain = gains / period;
-    const avgLoss = losses / period;
-
-    if (avgLoss === 0) return 100;
-    const rs = avgGain / avgLoss;
-    return 100 - (100 / (1 + rs));
+  calculateDonchian(chronological, endIdx, period) {
+    const start = Math.max(0, endIdx - period + 1);
+    const slice = chronological.slice(start, endIdx + 1);
+    const highs = slice.map(d => parseFloat(d.high));
+    const lows = slice.map(d => parseFloat(d.low));
+    const upper = Math.max(...highs);
+    const lower = Math.min(...lows);
+    const middle = (upper + lower) / 2;
+    return { upper, lower, middle };
   }
 
   /**
-   * Calculate Simple Moving Average (for volume confirmation)
-   */
-  calculateSMA(values, period) {
-    if (values.length < period) return values.reduce((a, b) => a + b, 0) / values.length;
-    const slice = values.slice(-period);
-    return slice.reduce((a, b) => a + b, 0) / period;
-  }
-
-  /**
-   * Calculate Average True Range (ATR) for dynamic stop-loss
-   * Transcript: "Use ATR for stop placement — don't use arbitrary numbers"
+   * Calculate Average True Range (ATR) — kept for stop-loss/take-profit sizing.
    */
   calculateATR(data, period = 14) {
     if (data.length < period + 1) return 0;
@@ -119,48 +155,10 @@ class StrategyEngine {
     return this.calculateSMA(trValues, period);
   }
 
-  /**
-   * Detect Support/Resistance levels from recent swing points
-   * Transcript: "Trade at key levels — don't chase price"
-   */
-  findKeyLevels(data, lookback = 20) {
-    const recent = data.slice(0, Math.min(lookback, data.length));
-    const highs = recent.map(d => parseFloat(d.high));
-    const lows = recent.map(d => parseFloat(d.low));
-
-    const resistance = Math.max(...highs);
-    const support = Math.min(...lows);
-    const currentPrice = parseFloat(recent[0].close);
-
-    // Distance to nearest key level (0 = at level, 1 = far away)
-    const distToSupport = (currentPrice - support) / (resistance - support);
-    const distToResistance = (resistance - currentPrice) / (resistance - support);
-
-    return {
-      support,
-      resistance,
-      distToSupport: Math.max(0, Math.min(1, distToSupport)),
-      distToResistance: Math.max(0, Math.min(1, distToResistance)),
-      nearSupport: distToSupport < 0.15,
-      nearResistance: distToResistance < 0.15
-    };
-  }
-
-  /**
-   * Volume analysis — confirm moves with above-average volume
-   * Transcript: "Volume validates the move — no volume, no conviction"
-   */
-  analyzeVolume(data) {
-    const volumes = data.map(d => parseInt(d.volume || 0));
-    const currentVol = volumes[0];
-    const avgVolume = this.calculateSMA(volumes, this.volumeMaPeriod);
-
-    return {
-      current: currentVol,
-      average: avgVolume,
-      ratio: avgVolume > 0 ? currentVol / avgVolume : 1,
-      confirmed: currentVol > avgVolume * 1.2 // 20% above average
-    };
+  calculateSMA(values, period) {
+    if (values.length < period) return values.reduce((a, b) => a + b, 0) / values.length;
+    const slice = values.slice(-period);
+    return slice.reduce((a, b) => a + b, 0) / period;
   }
 
   // =========================================================================
@@ -170,177 +168,108 @@ class StrategyEngine {
   /**
    * generateSetup()
    * ---------------
-   * Core function triggered by the frontend "Generate Setup" button.
-   * Evaluates ALL criteria from the YouTube strategy and produces:
+   * Evaluates Parabolic SAR + Donchian Channel confluence and produces:
    *   - signal: 'BUY' | 'SELL' | 'HOLD'
-   *   - score: 0-100 (probability % of setup playing out)
-   *   - breakdown: Which criteria passed/failed
+   *   - score: 0-100 (% match of the two-signal setup)
    *   - suggestedEntry, stopLoss, takeProfit
-   * 
-   * MAPPING FROM YOUTUBE TRANSCRIPT:
-   * ┌─────────────────────────────────────────────────────────────────────┐
-   │ Step 1: Trend Direction (EMA 9/21)                                  │
-   │   "If EMA 9 is above EMA 21 → Uptrend → look for BUY setups"        │
-   │   "If EMA 9 is below EMA 21 → Downtrend → look for SELL setups"   │
-   ├─────────────────────────────────────────────────────────────────────┤
-   │ Step 2: Momentum Filter (RSI)                                       │
-   │   "Don't buy when RSI > 70 (overbought)"                            │
-   │   "Don't sell when RSI < 30 (oversold)"                             │
-   ├─────────────────────────────────────────────────────────────────────┤
-   │ Step 3: Key Levels (Support/Resistance)                             │
-   │   "Buy near support, sell near resistance"                           │
-   │   "If price is in the middle of the range → WAIT"                   │
-   ├─────────────────────────────────────────────────────────────────────┤
-   │ Step 4: Volume Confirmation                                         │
-   │   "Volume should be above average to confirm the setup"             │
-   ├─────────────────────────────────────────────────────────────────────┤
-   │ Step 5: Greeks / Options Context (Placeholder for options logic)    │
-   │   "Delta tells you direction bias"                                  │
-   │   "Theta works against you — don't hold through high theta decay"   │
-   └─────────────────────────────────────────────────────────────────────┘
    */
   generateSetup(ohlcvData, currentPrice, symbol = 'EUR/USD') {
-    if (!ohlcvData || ohlcvData.length < this.emaSlow + 5) {
+    const minCandles = this.donchianPeriod + 5;
+    if (!ohlcvData || ohlcvData.length < minCandles) {
       return {
         signal: 'HOLD',
         score: 0,
-        error: 'Insufficient data for analysis. Need at least ' + (this.emaSlow + 5) + ' candles.',
+        error: 'Insufficient data for analysis. Need at least ' + minCandles + ' candles.',
         timestamp: new Date().toISOString()
       };
     }
 
-    // Reverse data so index 0 is oldest (chronological order for EMA calc)
+    // Reverse data so index 0 is oldest (chronological order)
     const chronological = [...ohlcvData].reverse();
+    const lastIdx = chronological.length - 1;
+    const prevIdx = lastIdx - 1;
 
-    // ── INDICATOR CALCULATIONS ──
-    const emaFastValues = this.calculateEMA(chronological, this.emaFast);
-    const emaSlowValues = this.calculateEMA(chronological, this.emaSlow);
-    const emaFastCurrent = emaFastValues[emaFastValues.length - 1];
-    const emaSlowCurrent = emaSlowValues[emaSlowValues.length - 1];
-    const emaFastPrev = emaFastValues[emaFastValues.length - 2];
-    const emaSlowPrev = emaSlowValues[emaSlowValues.length - 2];
-
-    const rsi = this.calculateRSI(chronological, this.rsiPeriod);
     const atr = this.calculateATR(ohlcvData, 14);
-    const levels = this.findKeyLevels(ohlcvData, 20);
-    const volume = this.analyzeVolume(ohlcvData);
 
-    // ── CRITERIA EVALUATION ──
+    // ── PARABOLIC SAR ──
+    const sarSeries = this.calculateParabolicSAR(chronological);
+    const sarCurrent = sarSeries[lastIdx];
+    const sarPrev = sarSeries[prevIdx];
+
+    const sarBullish = sarCurrent.trend === 'up';   // dots below price
+    const sarBearish = sarCurrent.trend === 'down';  // dots above price
+    const sarFlipped = sarCurrent.trend !== sarPrev.trend; // fresh flip this candle
+
+    // ── DONCHIAN CHANNEL (middle line) ──
+    const donchianCurrent = this.calculateDonchian(chronological, lastIdx, this.donchianPeriod);
+    const donchianPrev = this.calculateDonchian(chronological, prevIdx, this.donchianPeriod);
+
+    const closeCurrent = parseFloat(chronological[lastIdx].close);
+    const closePrev = parseFloat(chronological[prevIdx].close);
+
+    const priceAboveMidNow = closeCurrent > donchianCurrent.middle;
+    const priceAboveMidPrev = closePrev > donchianPrev.middle;
+
+    // A "cross" is the candle flipping from one side of the midline to the other
+    const donchianCrossedDown = priceAboveMidPrev && !priceAboveMidNow; // top → bottom = bearish
+    const donchianCrossedUp = !priceAboveMidPrev && priceAboveMidNow;   // bottom → top = bullish
+
+    const donchianBullish = priceAboveMidNow;
+    const donchianBearish = !priceAboveMidNow;
+    const donchianFreshCross = donchianCrossedUp || donchianCrossedDown;
+
+    // ── RESOLVE DIRECTION ──
+    // If SAR and Donchian agree, that's the direction. If they disagree,
+    // favor whichever one just gave a fresh signal (flip/cross); if neither
+    // is fresh, favor SAR as the primary trend filter (per the video, SAR
+    // is introduced first as the trend signal, Donchian confirms reversal).
+    let direction;
+    if (sarBullish && donchianBullish) direction = 'BUY';
+    else if (sarBearish && donchianBearish) direction = 'SELL';
+    else if (donchianFreshCross) direction = donchianCrossedUp ? 'BUY' : 'SELL';
+    else if (sarFlipped) direction = sarBullish ? 'BUY' : 'SELL';
+    else direction = sarBullish ? 'BUY' : 'SELL';
+
+    const wantsBullish = direction === 'BUY';
+
+    // ── SCORING: each indicator is worth 50% ──
     const criteria = [];
     let score = 0;
-    const maxScore = 100;
-    const pointsPerCriterion = maxScore / 6;
 
-    // CRITERION 1: EMA Trend Direction (Step 1 from transcript)
-    // "EMA 9 above EMA 21 = bullish trend"
-    const emaBullish = emaFastCurrent > emaSlowCurrent;
-    const emaBearish = emaFastCurrent < emaSlowCurrent;
-    const emaCrossover = (emaFastCurrent > emaSlowCurrent && emaFastPrev <= emaSlowPrev) ||
-                         (emaFastCurrent < emaSlowCurrent && emaFastPrev >= emaSlowPrev);
-
+    const sarAgrees = wantsBullish ? sarBullish : sarBearish;
     criteria.push({
-      name: 'EMA Trend Alignment',
-      description: `EMA${this.emaFast} (${emaFastCurrent.toFixed(5)}) vs EMA${this.emaSlow} (${emaSlowCurrent.toFixed(5)})`,
-      passed: emaBullish || emaBearish,
-      detail: emaBullish ? 'Bullish trend' : (emaBearish ? 'Bearish trend' : 'No clear trend'),
-      weight: pointsPerCriterion,
-      score: (emaBullish || emaBearish) ? pointsPerCriterion : pointsPerCriterion * 0.3
+      name: 'Parabolic SAR',
+      description: `SAR ${sarCurrent.sar.toFixed(5)} — dots ${sarCurrent.trend === 'up' ? 'below' : 'above'} price`,
+      passed: sarAgrees,
+      detail: sarAgrees
+        ? (sarFlipped ? `Fresh flip to ${sarCurrent.trend}trend — strong signal` : `Confirms ${sarCurrent.trend}trend`)
+        : `SAR shows ${sarCurrent.trend}trend — disagrees with Donchian`,
+      weight: 50,
+      score: sarAgrees ? (sarFlipped ? 50 : 42) : 0
     });
     score += criteria[criteria.length - 1].score;
 
-    // CRITERION 2: RSI Momentum Filter (Step 2 from transcript)
-    // "RSI between 30-70 = healthy momentum zone"
-    const rsiHealthy = rsi > 30 && rsi < 70;
-    const rsiBullishZone = rsi > 50 && rsi < 70; // Bullish but not overbought
-    const rsiBearishZone = rsi > 30 && rsi < 50; // Bearish but not oversold
-
+    const donchianAgrees = wantsBullish ? donchianBullish : donchianBearish;
     criteria.push({
-      name: 'RSI Momentum',
-      description: `RSI(${this.rsiPeriod}) = ${rsi.toFixed(2)}`,
-      passed: rsiHealthy,
-      detail: rsi > 70 ? 'Overbought — avoid buying' : (rsi < 30 ? 'Oversold — avoid selling' : `Healthy zone (${rsi.toFixed(1)})`),
-      weight: pointsPerCriterion,
-      score: rsiHealthy ? pointsPerCriterion : (rsi > 80 || rsi < 20 ? 0 : pointsPerCriterion * 0.4)
+      name: 'Donchian Channel Midline',
+      description: `Price ${closeCurrent.toFixed(5)} vs midline ${donchianCurrent.middle.toFixed(5)}`,
+      passed: donchianAgrees,
+      detail: donchianAgrees
+        ? (donchianFreshCross ? `Fresh cross ${donchianCrossedUp ? 'up' : 'down'} through midline — reversal confirmed` : `Price holding ${donchianBullish ? 'above' : 'below'} midline`)
+        : `Price on the ${donchianBullish ? 'upper' : 'lower'} side — disagrees with SAR`,
+      weight: 50,
+      score: donchianAgrees ? (donchianFreshCross ? 50 : 42) : 0
     });
     score += criteria[criteria.length - 1].score;
-
-    // CRITERION 3: Key Level Proximity (Step 3 from transcript)
-    // "Buy near support, sell near resistance"
-    const nearKeyLevel = levels.nearSupport || levels.nearResistance;
-
-    criteria.push({
-      name: 'Key Level Proximity',
-      description: `Support: ${levels.support.toFixed(5)}, Resistance: ${levels.resistance.toFixed(5)}`,
-      passed: nearKeyLevel,
-      detail: levels.nearSupport ? 'Near support — favorable for BUY' : 
-              (levels.nearResistance ? 'Near resistance — favorable for SELL' : 'Mid-range — wait for better entry'),
-      weight: pointsPerCriterion,
-      score: nearKeyLevel ? pointsPerCriterion : pointsPerCriterion * 0.2
-    });
-    score += criteria[criteria.length - 1].score;
-
-    // CRITERION 4: Volume Confirmation (Step 4 from transcript)
-    criteria.push({
-      name: 'Volume Confirmation',
-      description: `Current: ${volume.current.toLocaleString()}, Avg: ${volume.average.toLocaleString()}`,
-      passed: volume.confirmed,
-      detail: volume.confirmed ? `Volume ${volume.ratio.toFixed(1)}x average — confirmed` : 'Volume below average — low conviction',
-      weight: pointsPerCriterion,
-      score: volume.confirmed ? pointsPerCriterion : pointsPerCriterion * 0.5
-    });
-    score += criteria[criteria.length - 1].score;
-
-    // CRITERION 5: EMA Crossover / Pullback (Advanced from transcript)
-    // "Best entries happen on EMA pullback in direction of trend"
-    const priceAboveFast = currentPrice > emaFastCurrent;
-    const priceBelowFast = currentPrice < emaFastCurrent;
-    const pullbackToEma = Math.abs(currentPrice - emaFastCurrent) / currentPrice < 0.002; // Within 0.2%
-
-    criteria.push({
-      name: 'EMA Pullback / Momentum',
-      description: `Price ${currentPrice.toFixed(5)} vs EMA${this.emaFast} ${emaFastCurrent.toFixed(5)}`,
-      passed: pullbackToEma || emaCrossover,
-      detail: pullbackToEma ? 'Price pulling back to EMA — ideal entry zone' : 
-              (emaCrossover ? 'EMA crossover detected' : 'Price extended from EMA — wait'),
-      weight: pointsPerCriterion,
-      score: (pullbackToEma || emaCrossover) ? pointsPerCriterion : pointsPerCriterion * 0.4
-    });
-    score += criteria[criteria.length - 1].score;
-
-    // CRITERION 6: Options Greeks / Time Decay Awareness (Step 5 from transcript)
-    // Placeholder for options-specific logic — mapped from transcript
-    // "Avoid high theta decay periods", "Delta should align with signal direction"
-    const thetaFavorable = true; // Would check DTE (Days to Expiration) and theta values
-    const deltaAligned = true;   // Would check if option delta matches signal direction
-
-    criteria.push({
-      name: 'Greeks / Options Context',
-      description: 'Delta alignment & Theta decay check (options-specific)',
-      passed: thetaFavorable && deltaAligned,
-      detail: 'Delta aligned with trend | Theta decay acceptable | DTE > 7 days',
-      weight: pointsPerCriterion,
-      score: (thetaFavorable && deltaAligned) ? pointsPerCriterion : pointsPerCriterion * 0.5
-    });
-    score += criteria[criteria.length - 1].score;
-
-    // ── SIGNAL DETERMINATION ──
-    let signal = 'HOLD';
-    let confidence = score;
 
     const passedCount = criteria.filter(c => c.passed).length;
+    let confidence = Math.min(100, Math.round(score));
 
-    // Boost confidence for strong setups (done before threshold check so the
-    // boosted score is what gets compared to the 57% cutoff)
-    if (passedCount >= 5) confidence = Math.min(98, confidence + 10);
-    if (emaCrossover && volume.confirmed) confidence = Math.min(99, confidence + 8);
-
-    // Above 57% → always BUY or SELL, never HOLD. Below/equal 57% → HOLD.
+    // ── SIGNAL DETERMINATION ──
+    // Above 57% → BUY or SELL in the resolved direction. Below/equal 57% → HOLD.
+    let signal = 'HOLD';
     if (confidence > 57) {
-      if (emaFastCurrent >= emaSlowCurrent) {
-        signal = 'BUY';
-      } else {
-        signal = 'SELL';
-      }
+      signal = direction;
     }
 
     // ── TRADE PARAMETERS (Golden Risk Management Rules) ──
@@ -361,7 +290,7 @@ class StrategyEngine {
     const setup = {
       symbol,
       signal,
-      score: Math.round(confidence),
+      score: confidence,
       passedCriteria: passedCount,
       totalCriteria: criteria.length,
       currentPrice,
@@ -371,13 +300,12 @@ class StrategyEngine {
       positionSize: Math.floor(positionSize),
       riskRewardRatio: '1:2',
       indicators: {
-        emaFast: parseFloat(emaFastCurrent.toFixed(5)),
-        emaSlow: parseFloat(emaSlowCurrent.toFixed(5)),
-        rsi: parseFloat(rsi.toFixed(2)),
-        atr: parseFloat(atr.toFixed(5)),
-        support: parseFloat(levels.support.toFixed(5)),
-        resistance: parseFloat(levels.resistance.toFixed(5)),
-        volumeRatio: parseFloat(volume.ratio.toFixed(2))
+        sar: parseFloat(sarCurrent.sar.toFixed(5)),
+        sarTrend: sarCurrent.trend,
+        donchianUpper: parseFloat(donchianCurrent.upper.toFixed(5)),
+        donchianLower: parseFloat(donchianCurrent.lower.toFixed(5)),
+        donchianMiddle: parseFloat(donchianCurrent.middle.toFixed(5)),
+        atr: parseFloat(atr.toFixed(5))
       },
       criteria,
       timestamp: new Date().toISOString()
@@ -530,3 +458,4 @@ class StrategyEngine {
 }
 
 module.exports = StrategyEngine;
+        
