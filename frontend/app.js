@@ -71,15 +71,7 @@ const els = {
   scoreProgress: document.getElementById('scoreProgress'),
   scoreNumber: document.getElementById('scoreNumber'),
   setupDetails: document.getElementById('setupDetails'),
-  executeBtn: document.getElementById('executeBtn'),
-  tradesBody: document.getElementById('tradesBody'),
-  historyBody: document.getElementById('historyBody'),
-  refreshTrades: document.getElementById('refreshTrades'),
   signalList: document.getElementById('signalList'),
-  unrealizedPnL: document.getElementById('unrealizedPnL'),
-  realizedPnL: document.getElementById('realizedPnL'),
-  winRate: document.getElementById('winRate'),
-  totalTrades: document.getElementById('totalTrades'),
   toastContainer: document.getElementById('toastContainer'),
   paramEmaFast: document.getElementById('paramEmaFast'),
   paramEmaSlow: document.getElementById('paramEmaSlow'),
@@ -560,7 +552,7 @@ async function generateSetup(symbol) {
         resetGenerateBtn();
         return;
       }
-        if (setup.error === 'QUOTE_ERROR') {
+      if (setup.error === 'QUOTE_ERROR') {
         if (isRateLimitMessage(setup.detail)) {
           showToast('Daily data limit reached — try again after midnight UTC.', 'warning', 8000);
         } else {
@@ -579,12 +571,6 @@ async function generateSetup(symbol) {
     renderSetup(setup);
     addSignalToLog(setup);
     updatePairScore(targetSymbol, setup);
-
-    if (setup.signal !== 'HOLD') {
-      els.executeBtn.style.display = 'block';
-    } else {
-      els.executeBtn.style.display = 'none';
-    }
 
     showToast(`${targetSymbol}: ${setup.signal} (${setup.score}%)`, setup.score >= 60 ? 'success' : 'warning');
   } catch (err) {
@@ -726,96 +712,6 @@ function animateNumber(el, target) {
     }
     el.textContent = Math.round(current);
   }, 20);
-}
-
-// ═══════════════════════════════════════════════════════════════
-// TRADE EXECUTION
-// ═══════════════════════════════════════════════════════════════
-
-async function executeTrade() {
-  if (!state.lastSetup) {
-    showToast('No setup generated yet. Click Generate Setup first.', 'warning');
-    return;
-  }
-  const symbol = state.lastSetupSymbol || els.setupPairSelect.value;
-
-  try {
-    const result = await apiPost('/api/setup/execute', { symbol, setupId: Date.now() });
-    showToast(`Position opened: ${result.position.id} on ${symbol}`, 'success');
-    els.executeBtn.style.display = 'none';
-    loadTrades();
-  } catch (err) {
-    handleApiError(err, 'execute trade');
-  }
-}
-
-async function loadTrades() {
-  try {
-    const data = await apiGet('/api/trades');
-
-    if (data.activePositions && data.activePositions.length > 0) {
-      els.tradesBody.innerHTML = data.activePositions.map(pos => {
-        const decimals = 2;
-        return `
-        <tr>
-          <td>${pos.id}</td>
-          <td>${pos.symbol}</td>
-          <td><span class="direction-badge ${pos.direction.toLowerCase()}">${pos.direction}</span></td>
-          <td>${pos.entryPrice.toFixed(decimals)}</td>
-          <td>${pos.closePrice ? pos.closePrice.toFixed(decimals) : '--'}</td>
-          <td>${pos.stopLoss.toFixed(decimals)}</td>
-          <td>${pos.takeProfit.toFixed(decimals)}</td>
-          <td class="pnl-value ${pos.unrealizedPnL >= 0 ? 'positive' : 'negative'}">$${pos.unrealizedPnL.toFixed(2)}</td>
-          <td>${pos.setupScore}%</td>
-          <td><span class="status-badge open">OPEN</span></td>
-          <td><button class="btn-close" onclick="closePosition('${pos.id}', '${pos.symbol}')">Close</button></td>
-        </tr>
-      `}).join('');
-    } else {
-      els.tradesBody.innerHTML = `<tr class="empty-row"><td colspan="11">No active positions. Generate a setup to start trading.</td></tr>`;
-    }
-
-    if (data.tradeHistory && data.tradeHistory.length > 0) {
-      els.historyBody.innerHTML = data.tradeHistory.map(t => {
-        const decimals = 2;
-        return `
-        <tr>
-          <td>${t.id}</td>
-          <td>${t.symbol}</td>
-          <td><span class="direction-badge ${t.direction.toLowerCase()}">${t.direction}</span></td>
-          <td>${t.entryPrice.toFixed(decimals)}</td>
-          <td>${t.closePrice ? t.closePrice.toFixed(decimals) : '--'}</td>
-          <td class="pnl-value ${t.realizedPnL >= 0 ? 'positive' : 'negative'}">$${t.realizedPnL.toFixed(2)}</td>
-          <td>${t.closeReason || '--'}</td>
-          <td>${t.closeTime ? new Date(t.closeTime).toLocaleString() : '--'}</td>
-        </tr>
-      `}).join('');
-    } else {
-      els.historyBody.innerHTML = `<tr class="empty-row"><td colspan="8">No closed trades yet.</td></tr>`;
-    }
-
-    if (data.portfolio) {
-      const p = data.portfolio;
-      els.unrealizedPnL.textContent = (p.unrealizedPnL >= 0 ? '+' : '') + '$' + p.unrealizedPnL.toFixed(2);
-      els.unrealizedPnL.className = 'metric-value ' + (p.unrealizedPnL >= 0 ? 'positive' : 'negative');
-      els.realizedPnL.textContent = (p.realizedPnL >= 0 ? '+' : '') + '$' + p.realizedPnL.toFixed(2);
-      els.realizedPnL.className = 'metric-value ' + (p.realizedPnL >= 0 ? 'positive' : 'negative');
-      els.winRate.textContent = p.winRate + '%';
-      els.totalTrades.textContent = p.totalTrades;
-    }
-  } catch (err) {
-    console.error('[FRONTEND] Trades load error:', err);
-  }
-}
-
-async function closePosition(id, symbol) {
-  try {
-    await apiPost(`/api/positions/${id}/close`, { symbol });
-    showToast('Position closed', 'info');
-    loadTrades();
-  } catch (err) {
-    handleApiError(err, 'close position');
-  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -991,6 +887,7 @@ function showToast(message, type = 'info', duration = 4000) {
 // ═══════════════════════════════════════════════════════════════
 // EVENT LISTENERS
 // ═══════════════════════════════════════════════════════════════
+
 els.loginForm.addEventListener('submit', (e) => {
   e.preventDefault();
   attemptLogin();
@@ -998,8 +895,6 @@ els.loginForm.addEventListener('submit', (e) => {
 
 els.logoutBtn.addEventListener('click', logout);
 els.generateBtn.addEventListener('click', () => generateSetup());
-els.executeBtn.addEventListener('click', executeTrade);
-els.refreshTrades.addEventListener('click', loadTrades);
 els.botToggle.addEventListener('change', toggleBot);
 els.scanAllBtn.addEventListener('click', scanAllPairs);
 els.demoToggle.addEventListener('change', toggleDemo);
@@ -1034,12 +929,10 @@ async function initDashboard() {
 
   await loadStatus();
   await loadAllMarketData();
-  await loadTrades();
   await loadApiUsage();
 
   setInterval(checkHealth, 30000);
   setInterval(loadAllMarketData, 30000);
-  setInterval(loadTrades, 15000);
   setInterval(loadApiUsage, 10000);
 
   console.log('[FRONTEND] Dashboard initialized');
