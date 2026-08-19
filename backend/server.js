@@ -103,12 +103,9 @@ try {
 let botState = {
   status: 'PAUSED',
   timeframe: process.env.DEFAULT_TIMEFRAME || '5min',
-  pollIntervalMs: (parseInt(process.env.POLL_INTERVAL_SECONDS) || 30) * 1000,
   autoTrade: false,
   uptime: Date.now()
 };
-
-let pollTimer = null;
 
 // ═══════════════════════════════════════════════════════════════
 // DEMO DATA GENERATORS
@@ -287,7 +284,6 @@ app.get('/api/status', requireAuth, (req, res) => {
     },
     demoMode,
     userRole: req.user.role,
-    portfolio: getGlobalPortfolio(),
     serverTime: new Date().toISOString()
   });
 });
@@ -312,7 +308,6 @@ app.get('/api/market-data', requireAuth, async (req, res) => {
           anySuccess = true;
           if (pairState[sym]) {
             pairState[sym].lastPrice = quote.price;
-            pairState[sym].strategy.updatePositions(quote.price);
           }
         }
       }
@@ -335,7 +330,6 @@ app.get('/api/market-data', requireAuth, async (req, res) => {
     if (pairState[symbol]) {
       pairState[symbol].ohlcvCache = ohlcv;
       pairState[symbol].lastPrice = quote.price;
-      pairState[symbol].strategy.updatePositions(quote.price);
     }
 
     res.json({ symbol, quote, ohlcv: ohlcv.slice(0, 50), timestamp: new Date().toISOString() });
@@ -401,89 +395,6 @@ app.get('/api/setup', requireAuth, async (req, res) => {
   }
 });
 
-app.post('/api/setup/execute', requireAuth, async (req, res) => {
-  if (!servicesLoaded) return res.status(503).json({ error: 'Services not loaded' });
-
-  const { symbol } = req.body;
-  const targetSymbol = symbol || PAIRS[0];
-
-  if (!pairState[targetSymbol]?.lastSetup) {
-    return res.status(400).json({ error: 'No setup generated yet for this pair.' });
-  }
-
-  try {
-    const quote = demoMode ? generateDemoQuote(targetSymbol) : await tdService.getQuote(targetSymbol);
-    if (!quote?.price) {
-      return res.status(503).json({ error: 'Unable to fetch current price', detail: quote?.message });
-    }
-
-    const position = pairState[targetSymbol].strategy.openPosition(pairState[targetSymbol].lastSetup, quote.price);
-    if (position.error) {
-      return res.status(400).json({ error: position.error });
-    }
-
-    res.json({ message: 'Position opened', position, setup: pairState[targetSymbol].lastSetup });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get('/api/trades', requireAuth, (req, res) => {
-  if (!servicesLoaded) return res.status(503).json({ error: 'Services not loaded' });
-
-  const allActive = [];
-  const allHistory = [];
-
-  PAIRS.forEach(sym => {
-    if (pairState[sym]?.strategy) {
-      allActive.push(...pairState[sym].strategy.getActivePositions());
-      allHistory.push(...pairState[sym].strategy.getTradeHistory(50));
-    }
-  });
-
-  allHistory.sort((a, b) => new Date(b.closeTime || 0) - new Date(a.closeTime || 0));
-
-  res.json({
-    activePositions: allActive,
-    tradeHistory: allHistory.slice(0, 50),
-    portfolio: getGlobalPortfolio()
-  });
-});
-
-app.post('/api/positions/:id/close', requireAuth, async (req, res) => {
-  if (!servicesLoaded) return res.status(503).json({ error: 'Services not loaded' });
-
-  const { id } = req.params;
-  const { symbol } = req.body;
-
-  let targetSymbol = symbol;
-  let targetEngine = null;
-
-  if (targetSymbol && pairState[targetSymbol]?.strategy) {
-    targetEngine = pairState[targetSymbol].strategy;
-  } else {
-    for (const sym of PAIRS) {
-      const pos = pairState[sym]?.strategy?.getActivePositions()?.find(p => p.id === id);
-      if (pos) { targetSymbol = sym; targetEngine = pairState[sym].strategy; break; }
-    }
-  }
-
-  if (!targetEngine) return res.status(404).json({ error: 'Position not found' });
-
-  try {
-    const quote = demoMode ? generateDemoQuote(targetSymbol) : await tdService.getQuote(targetSymbol);
-    const currentPrice = quote?.price || null;
-    if (!currentPrice) return res.status(503).json({ error: 'Unable to fetch current price' });
-
-    const result = targetEngine.closePosition(id, currentPrice, 'MANUAL');
-    if (result.error) return res.status(404).json(result);
-
-    res.json({ message: 'Position closed', position: result });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
 app.post('/api/control', requireAuth, (req, res) => {
   if (!servicesLoaded) return res.status(503).json({ error: 'Services not loaded' });
 
@@ -491,11 +402,9 @@ app.post('/api/control', requireAuth, (req, res) => {
   switch (action) {
     case 'START':
       botState.status = 'ACTIVE';
-      startPolling();
       break;
     case 'PAUSE':
       botState.status = 'PAUSED';
-      stopPolling();
       break;
     case 'UPDATE':
       if (settings) {
@@ -540,60 +449,6 @@ app.get('*', (req, res) => {
 // HELPERS
 // ═══════════════════════════════════════════════════════════════
 
-function getGlobalPortfolio() {
-  let totalUnrealized = 0, totalRealized = 0, totalTrades = 0, totalWins = 0, activeCount = 0;
-  PAIRS.forEach(sym => {
-    if (pairState[sym]?.strategy) {
-      const port = pairState[sym].strategy.getPortfolio();
-      totalUnrealized += port.unrealizedPnL;
-      totalRealized += port.realizedPnL;
-      totalTrades += port.totalTrades;
-      totalWins += Math.round(port.totalTrades * (parseFloat(port.winRate) / 100));
-      activeCount += port.activePositions;
-    }
-  });
-  return {
-    activePositions: activeCount,
-    totalTrades,
-    winRate: totalTrades > 0 ? ((totalWins / totalTrades) * 100).toFixed(1) : 0,
-    unrealizedPnL: parseFloat(totalUnrealized.toFixed(2)),
-    realizedPnL: parseFloat(totalRealized.toFixed(2)),
-    totalPnL: parseFloat((totalUnrealized + totalRealized).toFixed(2))
-  };
-}
-
-async function pollMarket() {
-  if (botState.status !== 'ACTIVE' || !servicesLoaded) return;
-  for (const sym of PAIRS) {
-    try {
-      const ohlcv = demoMode ? generateDemoOHLCV() : await tdService.getTimeSeries(sym, botState.timeframe, 100);
-      if (pairState[sym]) pairState[sym].ohlcvCache = ohlcv;
-      const quote = demoMode ? generateDemoQuote(sym) : await tdService.getQuote(sym);
-      if (quote?.price && pairState[sym]) {
-        pairState[sym].lastPrice = quote.price;
-        pairState[sym].lastCheck = new Date().toISOString();
-        pairState[sym].strategy.updatePositions(quote.price);
-      }
-    } catch (err) {
-      console.error(`[POLL] Error for ${sym}:`, err.message);
-    }
-  }
-}
-
-function startPolling() {
-  if (pollTimer) clearInterval(pollTimer);
-  pollTimer = setInterval(pollMarket, botState.pollIntervalMs);
-  console.log(`[BOT] Polling started: ${PAIRS.length} pairs, ${botState.pollIntervalMs}ms`);
-  pollMarket();
-}
-
-function stopPolling() {
-  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; console.log('[BOT] Polling stopped'); }
-}
-
-process.on('SIGTERM', () => { stopPolling(); process.exit(0); });
-process.on('SIGINT', () => { stopPolling(); process.exit(0); });
-
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log('╔════════════════════════════════════════════════════════════╗');
@@ -605,3 +460,4 @@ app.listen(PORT, () => {
   console.log(`║  Mode: ${demoMode ? 'DEMO' : 'LIVE'}                                    ║`);
   console.log('╚════════════════════════════════════════════════════════════╝');
 });
+                    
