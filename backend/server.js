@@ -272,11 +272,11 @@ app.get('/api/status', requireAuth, (req, res) => {
       uptime: Date.now() - botState.uptime
     },
     strategy: {
-      name: 'XAU/USD Scalping Strategy',
+      name: 'Parabolic SAR + Donchian Channel Strategy',
       indicators: {
-        emaFast: parseInt(process.env.EMA_FAST_PERIOD || 9),
-        emaSlow: parseInt(process.env.EMA_SLOW_PERIOD || 21),
-        rsiPeriod: parseInt(process.env.RSI_PERIOD || 14)
+        sarStep: parseFloat(process.env.SAR_STEP || 0.03),
+        sarMax: parseFloat(process.env.SAR_MAX || 0.3),
+        donchianPeriod: parseInt(process.env.DONCHIAN_PERIOD || 10)
       },
       riskRules: {
         maxRiskPerTrade: parseFloat(process.env.MAX_RISK_PER_TRADE_PCT || 2) + '%',
