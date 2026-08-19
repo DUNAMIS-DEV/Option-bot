@@ -37,17 +37,13 @@ class StrategyEngine {
     // Donchian Channel period (from the video: period 10)
     this.donchianPeriod = parseInt(config.DONCHIAN_PERIOD || 10);
 
-    // Risk parameters (Golden Rules) — unchanged
+    // Used only to compute the informational suggested entry/SL/TP/size
+    // shown alongside a setup — no positions are opened or tracked.
     this.maxRiskPerTrade = parseFloat(config.MAX_RISK_PER_TRADE_PCT || 2.0);
     this.defaultSlPct = parseFloat(config.DEFAULT_STOP_LOSS_PCT || 1.5);
     this.defaultTpPct = parseFloat(config.DEFAULT_TAKE_PROFIT_PCT || 3.0);
-    this.maxPositions = parseInt(config.MAX_POSITIONS || 3);
 
-    // State
-    this.positions = [];       // Active positions
-    this.tradeHistory = [];    // Closed trades log
     this.lastSignal = null;    // Last generated signal
-    this.setupScore = 0;       // 0-100 probability score
   }
 
   // =========================================================================
@@ -314,148 +310,7 @@ class StrategyEngine {
     this.lastSignal = setup;
     return setup;
   }
-
-  // =========================================================================
-  // POSITION MANAGEMENT
-  // =========================================================================
-
-  /**
-   * Open a new position based on a generated setup
-   */
-  openPosition(setup, currentPrice) {
-    if (this.positions.length >= this.maxPositions) {
-      return { error: `Max positions (${this.maxPositions}) reached. Close a position first.` };
-    }
-
-    if (setup.signal === 'HOLD') {
-      return { error: 'Cannot open position for HOLD signal.' };
-    }
-
-    const position = {
-      id: `POS-${Date.now()}`,
-      symbol: setup.symbol,
-      direction: setup.signal, // BUY = Long, SELL = Short
-      entryPrice: currentPrice,
-      stopLoss: setup.stopLoss,
-      takeProfit: setup.takeProfit,
-      size: setup.positionSize,
-      openTime: new Date().toISOString(),
-      status: 'OPEN',
-      unrealizedPnL: 0,
-      realizedPnL: 0,
-      setupScore: setup.score
-    };
-
-    this.positions.push(position);
-    return position;
-  }
-
-  /**
-   * Update all positions with current market price
-   * Check stop-loss and take-profit triggers
-   */
-  updatePositions(currentPrice) {
-    const events = [];
-
-    this.positions = this.positions.map(pos => {
-      if (pos.status !== 'OPEN') return pos;
-
-      // Calculate unrealized P&L
-      const priceDiff = pos.direction === 'BUY' 
-        ? currentPrice - pos.entryPrice 
-        : pos.entryPrice - currentPrice;
-      pos.unrealizedPnL = parseFloat((priceDiff * pos.size).toFixed(2));
-
-      // Check stop-loss
-      const slHit = pos.direction === 'BUY' 
-        ? currentPrice <= pos.stopLoss 
-        : currentPrice >= pos.stopLoss;
-
-      // Check take-profit
-      const tpHit = pos.direction === 'BUY'
-        ? currentPrice >= pos.takeProfit
-        : currentPrice <= pos.takeProfit;
-
-      if (slHit || tpHit) {
-        pos.status = 'CLOSED';
-        pos.realizedPnL = pos.unrealizedPnL;
-        pos.closePrice = currentPrice;
-        pos.closeTime = new Date().toISOString();
-        pos.closeReason = slHit ? 'STOP_LOSS' : 'TAKE_PROFIT';
-
-        // Move to history
-        this.tradeHistory.push({ ...pos });
-        events.push({
-          type: 'POSITION_CLOSED',
-          position: pos,
-          reason: pos.closeReason
-        });
-      }
-
-      return pos;
-    });
-
-    // Remove closed positions from active list
-    this.positions = this.positions.filter(p => p.status === 'OPEN');
-
-    return events;
-  }
-
-  /**
-   * Get portfolio summary
-   */
-  getPortfolio() {
-    const totalUnrealized = this.positions.reduce((sum, p) => sum + p.unrealizedPnL, 0);
-    const totalRealized = this.tradeHistory.reduce((sum, t) => sum + t.realizedPnL, 0);
-    const winCount = this.tradeHistory.filter(t => t.realizedPnL > 0).length;
-
-    return {
-      activePositions: this.positions.length,
-      totalTrades: this.tradeHistory.length,
-      winRate: this.tradeHistory.length > 0 ? (winCount / this.tradeHistory.length * 100).toFixed(1) : 0,
-      unrealizedPnL: parseFloat(totalUnrealized.toFixed(2)),
-      realizedPnL: parseFloat(totalRealized.toFixed(2)),
-      totalPnL: parseFloat((totalUnrealized + totalRealized).toFixed(2))
-    };
-  }
-
-  /**
-   * Get all active positions
-   */
-  getActivePositions() {
-    return this.positions;
-  }
-
-  /**
-   * Get trade history
-   */
-  getTradeHistory(limit = 50) {
-    return this.tradeHistory.slice(-limit).reverse();
-  }
-
-  /**
-   * Manual close a position
-   */
-  closePosition(positionId, currentPrice, reason = 'MANUAL') {
-    const idx = this.positions.findIndex(p => p.id === positionId);
-    if (idx === -1) return { error: 'Position not found' };
-
-    const pos = this.positions[idx];
-    pos.status = 'CLOSED';
-    const priceDiff = pos.direction === 'BUY' 
-      ? currentPrice - pos.entryPrice 
-      : pos.entryPrice - currentPrice;
-    pos.realizedPnL = parseFloat((priceDiff * pos.size).toFixed(2));
-    pos.closePrice = currentPrice;
-    pos.closeTime = new Date().toISOString();
-    pos.closeReason = reason;
-
-    this.tradeHistory.push({ ...pos });
-    this.positions.splice(idx, 1);
-
-    return pos;
-  }
 }
 
 module.exports = StrategyEngine;
-        
+    
