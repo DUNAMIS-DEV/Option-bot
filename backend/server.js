@@ -36,6 +36,11 @@ const PAIRS = ['XAU/USD'];
 const DEMO_MODE = !API_KEY || API_KEY.length < 10;
 let demoMode = DEMO_MODE;
 
+// How many recent candles the strategy looks back over. Lower = reacts to
+// shorter-term moves (matches what you'd see zoomed into the last few
+// hours on a chart); higher = smooths over pullbacks within a longer trend.
+const CANDLE_LOOKBACK = parseInt(process.env.CANDLE_LOOKBACK) || 40;
+
 console.log('[SERVER] ===========================================');
 console.log('[SERVER] Pairs:', PAIRS.join(', '));
 console.log('[SERVER] API Key:', API_KEY ? 'SET (' + API_KEY.substring(0, 6) + '...)' : 'MISSING');
@@ -128,7 +133,7 @@ function generateDemoQuote(symbol) {
   };
 }
 
-function generateDemoOHLCV(count = 100) {
+function generateDemoOHLCV(count = CANDLE_LOOKBACK) {
   const data = [];
   let price = 2433.50;
   const now = new Date();
@@ -145,7 +150,14 @@ function generateDemoOHLCV(count = 100) {
       volume: Math.floor(Math.random() * 40000 + 10000).toString()
     });
   }
-  return data;
+  // Twelve Data's real API returns candles NEWEST-FIRST (index 0 = latest),
+  // and strategyEngine.js relies on that — it reverses the array itself to
+  // get chronological order. The loop above builds this array OLDEST-FIRST
+  // (data[0] = earliest candle), which is backwards. Reverse it here so
+  // demo mode matches the real API's ordering exactly, otherwise every
+  // trend gets read upside-down by the strategy (this was causing BUY-only
+  // signals during sustained downtrends in demo mode).
+  return data.reverse();
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -320,7 +332,7 @@ app.get('/api/market-data', requireAuth, async (req, res) => {
       ohlcv = generateDemoOHLCV();
     } else {
       quote = await tdService.getQuote(symbol);
-      ohlcv = await tdService.getTimeSeries(symbol, botState.timeframe, 100);
+      ohlcv = await tdService.getTimeSeries(symbol, botState.timeframe, CANDLE_LOOKBACK);
     }
 
     if (quote?.error) {
@@ -355,7 +367,7 @@ app.get('/api/setup', requireAuth, async (req, res) => {
     for (const sym of PAIRS) {
       let ohlcv = pairState[sym].ohlcvCache || [];
       if (ohlcv.length < 30) {
-        ohlcv = demoMode ? generateDemoOHLCV() : await tdService.getTimeSeries(sym, botState.timeframe, 100);
+        ohlcv = demoMode ? generateDemoOHLCV() : await tdService.getTimeSeries(sym, botState.timeframe, CANDLE_LOOKBACK);
         pairState[sym].ohlcvCache = ohlcv;
       }
       let quote = demoMode ? generateDemoQuote(sym) : await tdService.getQuote(sym);
@@ -372,7 +384,7 @@ app.get('/api/setup', requireAuth, async (req, res) => {
   try {
     let ohlcv = pairState[symbol].ohlcvCache || [];
     if (ohlcv.length < 30) {
-      ohlcv = demoMode ? generateDemoOHLCV() : await tdService.getTimeSeries(symbol, botState.timeframe, 100);
+      ohlcv = demoMode ? generateDemoOHLCV() : await tdService.getTimeSeries(symbol, botState.timeframe, CANDLE_LOOKBACK);
       pairState[symbol].ohlcvCache = ohlcv;
     }
 
@@ -460,4 +472,4 @@ app.listen(PORT, () => {
   console.log(`║  Mode: ${demoMode ? 'DEMO' : 'LIVE'}                                    ║`);
   console.log('╚════════════════════════════════════════════════════════════╝');
 });
-                    
+            
