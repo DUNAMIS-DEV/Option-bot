@@ -200,13 +200,19 @@ class StrategyEngine {
     const donchianCurrent = this.calculateDonchian(chronological, lastIdx, this.donchianPeriod);
     const donchianPrev = this.calculateDonchian(chronological, prevIdx, this.donchianPeriod);
 
-    const closeCurrent = parseFloat(chronological[lastIdx].close);
-    const closePrev = parseFloat(chronological[prevIdx].close);
+    // Use the live quote (currentPrice) rather than the last CLOSED candle's
+    // close. Candles only update once per interval (e.g. every 5 minutes),
+    // so judging "above/below midline" off a stale candle close can
+    // disagree with what the live price is actually doing right now,
+    // especially mid-candle. currentPrice always reflects the latest quote.
+    const closeCurrent = parseFloat(currentPrice);
+    const closePrev = parseFloat(chronological[lastIdx].close); // last closed candle, for detecting a fresh cross
 
     const priceAboveMidNow = closeCurrent > donchianCurrent.middle;
-    const priceAboveMidPrev = closePrev > donchianPrev.middle;
+    const priceAboveMidPrev = closePrev > donchianCurrent.middle;
 
-    // A "cross" is the candle flipping from one side of the midline to the other
+    // A "cross" is live price now sitting on the opposite side of the
+    // midline from where the last completed candle closed.
     const donchianCrossedDown = priceAboveMidPrev && !priceAboveMidNow; // top → bottom = bearish
     const donchianCrossedUp = !priceAboveMidPrev && priceAboveMidNow;   // bottom → top = bullish
 
@@ -298,10 +304,13 @@ class StrategyEngine {
       indicators: {
         sar: parseFloat(sarCurrent.sar.toFixed(5)),
         sarTrend: sarCurrent.trend,
+        sarBasedOnCandleClose: parseFloat(chronological[lastIdx].close.toFixed ? chronological[lastIdx].close.toFixed(5) : chronological[lastIdx].close),
         donchianUpper: parseFloat(donchianCurrent.upper.toFixed(5)),
         donchianLower: parseFloat(donchianCurrent.lower.toFixed(5)),
         donchianMiddle: parseFloat(donchianCurrent.middle.toFixed(5)),
-        atr: parseFloat(atr.toFixed(5))
+        atr: parseFloat(atr.toFixed(5)),
+        candleCount: chronological.length,
+        lastCandleTime: chronological[lastIdx].datetime
       },
       criteria,
       timestamp: new Date().toISOString()
@@ -313,4 +322,4 @@ class StrategyEngine {
 }
 
 module.exports = StrategyEngine;
-    
+          
